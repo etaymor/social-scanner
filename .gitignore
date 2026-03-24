@@ -1,4 +1,6 @@
 places.db
+places.db-wal
+places.db-shm
 .env
 .DS_Store
 __pycache__/

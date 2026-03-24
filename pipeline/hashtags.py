@@ -27,10 +27,16 @@ Focus on these categories:
 - Nightlife that isn't in guidebooks
 - Cool viewpoints or photo spots
 
+IMPORTANT hashtag format rules:
+- Every hashtag MUST start with the city name (e.g. "istanbul", "tokyo")
+- Use compound terms that combine city + specific descriptor (e.g. "tokyocafehopping", "istanbulstreetfood")
+- Avoid short generic terms like "tokyofood" or "tokyocafe" — be more specific
+- Think about what creators actually type when posting about a specific place they discovered
+
 City: {city_name}
 
 Return ONLY a JSON object with a "hashtags" key containing an array of hashtag strings without the # symbol.
-Example: {{"hashtags": ["istanbulhiddengems", "istanbullocals", "istanbulfoodie"]}}"""
+Example: {{"hashtags": ["istanbulhiddenstreets", "istanbullocaleats", "istanbulrooftopviews"]}}"""
 
 CATEGORY_PROMPT_TEMPLATE = """\
 You are a social media research assistant. Given a city name and a category,
@@ -38,11 +44,17 @@ generate {count} hashtags that travelers and locals use on TikTok and Instagram
 to share NON-OBVIOUS, local-favorite places in that specific category.
 Avoid generic tourism hashtags.
 
+IMPORTANT hashtag format rules:
+- Every hashtag MUST start with the city name (e.g. "istanbul", "tokyo")
+- Use compound terms that combine city + specific descriptor (e.g. "tokyocafehopping", "istanbulcocktailbars")
+- Avoid short generic terms like "tokyobars" or "tokyofood" — be more specific
+- Think about what creators actually type when posting about a specific place they discovered
+
 City: {city_name}
 Category: {category_label} — {category_description}
 
 Return ONLY a JSON object with a "hashtags" key containing an array of hashtag strings without the # symbol.
-Example: {{"hashtags": ["istanbulhiddenbars", "istanbulnightlife", "istanbulclubs"]}}"""
+Example: {{"hashtags": ["istanbulhiddenbars", "istanbulcocktailscene", "istanbulrooftopbars"]}}"""
 
 
 def _universal_hashtags(city_name: str) -> list[str]:
@@ -53,7 +65,6 @@ def _universal_hashtags(city_name: str) -> list[str]:
         f"{city}locals",
         f"{city}secretspots",
         f"{city}underrated",
-        f"{city}foodie",
     ]
 
 
@@ -64,7 +75,8 @@ def _category_seed_hashtags(city_name: str, category: str) -> list[str]:
     tags: list[str] = []
     for suffix in seeds.get("suffixes", []):
         tags.append(f"{city}{suffix}")
-    tags.extend(seeds.get("tags", []))
+    for tag in seeds.get("tags", []):
+        tags.append(f"{city}{tag}")
     return tags
 
 
