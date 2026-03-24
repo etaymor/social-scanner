@@ -42,23 +42,14 @@ WEIGHT_LIKES = 1.0
 # Database
 DB_PATH = Path(os.getenv("DB_PATH", "places.db"))
 
-# Place types
-VALID_PLACE_TYPES = frozenset({
-    "restaurant", "cafe", "bar", "club", "market", "neighborhood",
-    "viewpoint", "park", "museum", "gallery", "shop", "activity",
-    "street", "other",
-    # Expanded types for category support
-    "hotel", "hostel", "tour", "class", "beach", "temple", "spa",
-    "brewery", "lounge", "bakery", "garden", "theater", "monument",
-    "boutique", "trail", "workshop",
-})
+# Place types (derived after CATEGORIES below)
 
 # Categories
 CATEGORIES = {
     "food_and_drink": {
         "label": "Food & Drink",
-        "description": "Restaurants, cafes, bakeries, and food markets",
-        "types": ["restaurant", "cafe", "bar", "bakery", "market"],
+        "description": "Restaurants, cafes, and bakeries",
+        "types": ["restaurant", "cafe", "bakery"],
     },
     "places_to_stay": {
         "label": "Places to Stay",
@@ -98,38 +89,16 @@ CATEGORIES = {
 }
 
 VALID_CATEGORIES = frozenset(CATEGORIES.keys())
+DEFAULT_CATEGORY = "sights_and_attractions"
 
+# Derived from CATEGORIES — single source of truth for type→category mapping
 TYPE_TO_CATEGORY = {
-    "restaurant": "food_and_drink",
-    "cafe": "food_and_drink",
-    "bakery": "food_and_drink",
-    "bar": "nightlife",
-    "club": "nightlife",
-    "lounge": "nightlife",
-    "brewery": "nightlife",
-    "hotel": "places_to_stay",
-    "hostel": "places_to_stay",
-    "market": "shopping",
-    "shop": "shopping",
-    "boutique": "shopping",
-    "neighborhood": "sights_and_attractions",
-    "viewpoint": "sights_and_attractions",
-    "street": "sights_and_attractions",
-    "monument": "sights_and_attractions",
-    "temple": "sights_and_attractions",
-    "park": "outdoors_and_nature",
-    "beach": "outdoors_and_nature",
-    "garden": "outdoors_and_nature",
-    "trail": "outdoors_and_nature",
-    "museum": "arts_and_culture",
-    "gallery": "arts_and_culture",
-    "theater": "arts_and_culture",
-    "activity": "activities_and_experiences",
-    "tour": "activities_and_experiences",
-    "class": "activities_and_experiences",
-    "spa": "activities_and_experiences",
-    "workshop": "activities_and_experiences",
+    place_type: cat_key
+    for cat_key, cat_val in CATEGORIES.items()
+    for place_type in cat_val["types"]
 }
+
+VALID_PLACE_TYPES = frozenset(TYPE_TO_CATEGORY.keys()) | {"other"}
 
 CATEGORY_HASHTAG_SEEDS = {
     "food_and_drink": {

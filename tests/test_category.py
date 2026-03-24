@@ -86,33 +86,20 @@ class TestTypeToCategoryMapping:
 class TestCategoryHashtagGeneration:
     @patch("pipeline.hashtags.call_llm_json")
     def test_category_generates_mixed_hashtags(self, mock_llm, conn, city_id):
-        """Category hashtags should include category-specific + generic + universal."""
-        call_count = 0
-
-        def side_effect(prompt, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                # Category-specific call
-                return {"hashtags": [f"tag_cat_{i}" for i in range(12)]}
-            else:
-                # Generic call
-                return {"hashtags": [f"tag_gen_{i}" for i in range(3)]}
-
-        mock_llm.side_effect = side_effect
+        """Category hashtags should include category-specific + seed + universal."""
+        mock_llm.return_value = {"hashtags": [f"tag_cat_{i}" for i in range(15)]}
 
         from pipeline.hashtags import generate_hashtags
         tags = generate_hashtags(conn, city_id, "Istanbul", category="nightlife")
 
-        # Should have LLM category tags + generic tags + seed tags + universal
+        # Should have LLM category tags + seed tags + universal
         assert len(tags) > 15
         assert "tag_cat_0" in tags
-        assert "tag_gen_0" in tags
         assert "istanbulhiddengems" in tags  # universal
         assert "istanbulnightlife" in tags  # category seed suffix
 
-        # 2 LLM calls (category + generic)
-        assert mock_llm.call_count == 2
+        # Single LLM call (category-specific only, no generic call)
+        assert mock_llm.call_count == 1
 
         # Hashtags should be stored with category
         rows = conn.execute(

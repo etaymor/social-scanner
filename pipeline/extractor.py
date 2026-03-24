@@ -65,7 +65,7 @@ def _validate_category(category: str | None, place_type: str) -> str:
     # Fallback: derive from place type
     if place_type in config.TYPE_TO_CATEGORY:
         return config.TYPE_TO_CATEGORY[place_type]
-    return "sights_and_attractions"
+    return config.DEFAULT_CATEGORY
 
 
 def _process_batch(

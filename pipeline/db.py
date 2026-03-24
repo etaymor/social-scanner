@@ -3,6 +3,8 @@
 import sqlite3
 from pathlib import Path
 
+import re
+
 from config import DB_PATH
 
 
@@ -99,8 +101,17 @@ def init_db(conn: sqlite3.Connection) -> None:
     for table in ("places", "hashtags"):
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN category TEXT DEFAULT NULL")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" not in str(e):
+                raise
+
+    # Category-aware composite indexes (must come after category column migration)
+    conn.executescript("""
+        CREATE INDEX IF NOT EXISTS idx_places_city_category_score
+            ON places(city_id, category, virality_score DESC);
+        CREATE INDEX IF NOT EXISTS idx_hashtags_city_status_category
+            ON hashtags(city_id, scrape_status, category);
+    """)
 
     conn.commit()
 
@@ -217,10 +228,9 @@ def mark_posts_processed(conn: sqlite3.Connection, post_ids: list[int]) -> None:
 # --- Place helpers ---
 
 def upsert_place(conn: sqlite3.Connection, city_id: int, name: str,
-                 place_type: str, post_id: int, sample_caption: str = None,
+                 place_type: str, post_id: int, sample_caption: str | None = None,
                  category: str | None = None) -> int:
     """Insert or update a place, link it to the post. Returns place id."""
-    import re
     name = re.sub(r"<[^>]+>", "", name)[:200].strip()
     if not name:
         return -1
@@ -231,16 +241,10 @@ def upsert_place(conn: sqlite3.Connection, city_id: int, name: str,
 
     if row:
         place_id = row["id"]
-        if category:
-            conn.execute(
-                "UPDATE places SET mention_count = mention_count + 1, category = ? WHERE id = ?",
-                (category, place_id),
-            )
-        else:
-            conn.execute(
-                "UPDATE places SET mention_count = mention_count + 1 WHERE id = ?",
-                (place_id,),
-            )
+        conn.execute(
+            "UPDATE places SET mention_count = mention_count + 1, category = COALESCE(?, category) WHERE id = ?",
+            (category, place_id),
+        )
     else:
         cur = conn.execute(
             "INSERT INTO places (city_id, name, type, sample_caption, category) VALUES (?, ?, ?, ?, ?)",
@@ -266,25 +270,19 @@ def get_places_page(conn: sqlite3.Connection, city_id: int,
                     page: int = 1, per_page: int = 50,
                     category: str | None = None) -> tuple[list[sqlite3.Row], int]:
     """Return a page of places and total count for pagination."""
+    where = "WHERE city_id = ?"
+    params: list = [city_id]
     if category:
-        total = conn.execute(
-            "SELECT COUNT(*) as cnt FROM places WHERE city_id = ? AND category = ?",
-            (city_id, category),
-        ).fetchone()["cnt"]
-        offset = (page - 1) * per_page
-        rows = conn.execute(
-            "SELECT * FROM places WHERE city_id = ? AND category = ? ORDER BY virality_score DESC LIMIT ? OFFSET ?",
-            (city_id, category, per_page, offset),
-        ).fetchall()
-    else:
-        total = conn.execute(
-            "SELECT COUNT(*) as cnt FROM places WHERE city_id = ?", (city_id,),
-        ).fetchone()["cnt"]
-        offset = (page - 1) * per_page
-        rows = conn.execute(
-            "SELECT * FROM places WHERE city_id = ? ORDER BY virality_score DESC LIMIT ? OFFSET ?",
-            (city_id, per_page, offset),
-        ).fetchall()
+        where += " AND category = ?"
+        params.append(category)
+    total = conn.execute(
+        f"SELECT COUNT(*) as cnt FROM places {where}", params,
+    ).fetchone()["cnt"]
+    offset = (page - 1) * per_page
+    rows = conn.execute(
+        f"SELECT * FROM places {where} ORDER BY virality_score DESC LIMIT ? OFFSET ?",
+        [*params, per_page, offset],
+    ).fetchall()
     return rows, total
 
 

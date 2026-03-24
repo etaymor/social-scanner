@@ -44,17 +44,6 @@ Category: {category_label} — {category_description}
 Return ONLY a JSON object with a "hashtags" key containing an array of hashtag strings without the # symbol.
 Example: {{"hashtags": ["istanbulhiddenbars", "istanbulnightlife", "istanbulclubs"]}}"""
 
-GENERIC_PROMPT_TEMPLATE = """\
-You are a social media research assistant. Given a city name, generate {count} hashtags
-that travelers and locals use on TikTok and Instagram to share NON-OBVIOUS,
-local-favorite, hidden-gem places. Avoid generic tourism hashtags.
-Focus on general hidden gems and secret spots, not any specific category.
-
-City: {city_name}
-
-Return ONLY a JSON object with a "hashtags" key containing an array of hashtag strings without the # symbol.
-Example: {{"hashtags": ["istanbulhiddengems", "istanbullocals", "istanbulsecretspots"]}}"""
-
 
 def _universal_hashtags(city_name: str) -> list[str]:
     """Return five hardcoded universal hashtags for *city_name*."""
@@ -115,8 +104,8 @@ def generate_hashtags(
 ) -> list[str]:
     """Generate hashtags for *city_name*, store them, and return the unique list.
 
-    When *category* is provided, generates ~12 category-specific LLM hashtags
-    + ~3 generic LLM hashtags + 5 universal hardcoded tags.
+    When *category* is provided, generates ~15 category-specific LLM hashtags
+    (single call) + category seed tags + 5 universal hardcoded tags.
     When omitted, uses the original 15-tag generic prompt + 5 universal tags.
     """
     log.info(
@@ -127,9 +116,9 @@ def generate_hashtags(
     if category and category in config.VALID_CATEGORIES:
         cat_info = config.CATEGORIES[category]
 
-        # ~12 category-specific LLM hashtags
+        # ~15 category-specific LLM hashtags (single call)
         cat_prompt = CATEGORY_PROMPT_TEMPLATE.format(
-            count=12,
+            count=15,
             city_name=city_name,
             category_label=cat_info["label"],
             category_description=cat_info["description"],
@@ -137,18 +126,13 @@ def generate_hashtags(
         cat_tags = _call_llm_for_tags(cat_prompt)
         log.info("LLM returned %d category-specific hashtags", len(cat_tags))
 
-        # ~3 generic LLM hashtags
-        gen_prompt = GENERIC_PROMPT_TEMPLATE.format(count=3, city_name=city_name)
-        gen_tags = _call_llm_for_tags(gen_prompt)
-        log.info("LLM returned %d generic hashtags", len(gen_tags))
-
         # Category-specific seed hashtags
         seed_tags = _category_seed_hashtags(city_name, category)
 
         # Universal hardcoded
         universal = _universal_hashtags(city_name)
 
-        all_tags = cat_tags + gen_tags + seed_tags + universal
+        all_tags = cat_tags + seed_tags + universal
     else:
         # Original behavior: 15 generic LLM hashtags + 5 universal
         prompt = PROMPT_TEMPLATE.format(city_name=city_name)
