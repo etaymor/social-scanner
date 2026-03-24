@@ -1,0 +1,456 @@
+# Atlasi Place Discovery Pipeline — Spec Document
+
+## Purpose
+
+A Python CLI tool that discovers trending, non-obvious places in any city by scraping TikTok and Instagram via Apify, extracting place names using an LLM, deduplicating/scoring them, and storing everything in a local SQLite database. Built to feed TikTok slideshow content for the Atlasi travel app.
+
+---
+
+## Architecture Overview
+
+```
+CLI Input (city name)
+    │
+    ▼
+Hashtag Generator (LLM)
+    │
+    ▼
+Apify Scrapers (TikTok + Instagram)
+    │
+    ▼
+Raw Post Storage (SQLite)
+    │
+    ▼
+LLM Place Extraction
+    │
+    ▼
+Deduplication + Scoring
+    │
+    ▼
+Tourist Trap Filter (LLM)
+    │
+    ▼
+Final Places Table (SQLite)
+```
+
+---
+
+## Tech Stack
+
+- **Language**: Python 3.11+
+- **Scraping**: Apify API (via `apify-client` Python package)
+- **LLM**: OpenRouter API (model configurable, default `anthropic/claude-sonnet-4`)
+- **Database**: SQLite (single local file, `places.db`)
+- **Config**: `.env` file for API keys
+
+---
+
+## Environment Variables (`.env`)
+
+```
+APIFY_API_TOKEN=your_apify_token
+OPENROUTER_API_KEY=your_openrouter_key
+OPENROUTER_MODEL=anthropic/claude-sonnet-4  # optional, this is the default
+```
+
+---
+
+## CLI Interface
+
+```bash
+# Basic usage
+python discover.py --city "Istanbul"
+
+# With options
+python discover.py --city "Istanbul" --max-posts 100 --skip-scrape --only-extract
+```
+
+### CLI Arguments
+
+| Argument         | Required | Default | Description                                               |
+| ---------------- | -------- | ------- | --------------------------------------------------------- |
+| `--city`         | Yes      | —       | City name to research                                     |
+| `--max-posts`    | No       | 100     | Max posts to pull per hashtag per platform                |
+| `--skip-scrape`  | No       | false   | Skip scraping, run extraction on existing raw posts       |
+| `--only-extract` | No       | false   | Only run LLM extraction + scoring on already-scraped data |
+| `--reset`        | No       | false   | Clear all data for this city before running               |
+
+---
+
+## Database Schema (SQLite)
+
+### Table: `cities`
+
+```sql
+CREATE TABLE cities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### Table: `hashtags`
+
+```sql
+CREATE TABLE hashtags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    city_id INTEGER NOT NULL REFERENCES cities(id),
+    tag TEXT NOT NULL,
+    platform TEXT NOT NULL CHECK(platform IN ('tiktok', 'instagram')),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(city_id, tag, platform)
+);
+```
+
+### Table: `raw_posts`
+
+```sql
+CREATE TABLE raw_posts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    city_id INTEGER NOT NULL REFERENCES cities(id),
+    platform TEXT NOT NULL CHECK(platform IN ('tiktok', 'instagram')),
+    post_id TEXT NOT NULL,
+    hashtag TEXT NOT NULL,
+    caption TEXT,
+    likes INTEGER DEFAULT 0,
+    comments INTEGER DEFAULT 0,
+    shares INTEGER DEFAULT 0,
+    saves INTEGER DEFAULT 0,
+    views INTEGER DEFAULT 0,
+    url TEXT,
+    author TEXT,
+    created_at TIMESTAMP,
+    scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    processed BOOLEAN DEFAULT FALSE,
+    UNIQUE(platform, post_id)
+);
+```
+
+### Table: `places`
+
+```sql
+CREATE TABLE places (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    city_id INTEGER NOT NULL REFERENCES cities(id),
+    name TEXT NOT NULL,
+    type TEXT NOT NULL CHECK(type IN ('restaurant', 'cafe', 'bar', 'club', 'market', 'neighborhood', 'viewpoint', 'park', 'museum', 'gallery', 'shop', 'activity', 'street', 'other')),
+    mention_count INTEGER DEFAULT 1,
+    virality_score REAL DEFAULT 0.0,
+    is_tourist_trap BOOLEAN DEFAULT FALSE,
+    sample_caption TEXT,
+    source_post_ids TEXT, -- JSON array of raw_post IDs
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(city_id, name)
+);
+```
+
+---
+
+## Pipeline Steps — Detailed
+
+### Step 1: Hashtag Generation
+
+**Input**: City name (string)
+
+**Action**: Call OpenRouter with a prompt to generate targeted hashtags.
+
+**Prompt**:
+
+```
+You are a social media research assistant. Given a city name, generate 15 hashtags
+that travelers and locals use on TikTok and Instagram to share NON-OBVIOUS,
+local-favorite, hidden-gem places. Avoid generic tourism hashtags.
+
+Focus on these categories:
+- Hidden gems / secret spots
+- Local favorites
+- Food and drink spots locals love
+- Underrated neighborhoods
+- Nightlife that isn't in guidebooks
+- Cool viewpoints or photo spots
+
+City: {city_name}
+
+Return ONLY a JSON array of hashtag strings without the # symbol.
+Example: ["istanbulhiddengems", "istanbullocals", "istanbulfoodie"]
+```
+
+**Output**: List of 15 hashtags
+
+**Notes**:
+
+- Also include a few hardcoded universal hashtags appended to the LLM output: `{city}hiddengems`, `{city}locals`, `{city}secretspots`, `{city}underrated`, `{city}foodie`
+- Dedupe after merging LLM + hardcoded lists
+- Store all hashtags in the `hashtags` table
+
+---
+
+### Step 2: Apify Scraping
+
+**Platforms**: TikTok + Instagram
+
+**Apify Actors to use**:
+
+| Platform  | Actor                     | Actor ID                          |
+| --------- | ------------------------- | --------------------------------- |
+| TikTok    | TikTok Scraper            | `clockworks/free-tiktok-scraper`  |
+| Instagram | Instagram Hashtag Scraper | `apify/instagram-hashtag-scraper` |
+
+**For each hashtag**:
+
+1. Call the Apify API to start a scraper run
+2. Wait for run completion (poll status endpoint, or use synchronous run endpoint)
+3. Fetch results from the dataset
+4. Map results to the `raw_posts` schema and INSERT into SQLite
+
+**TikTok field mapping** (from Apify actor output → raw_posts):
+
+```python
+{
+    "post_id": item.get("id"),
+    "caption": item.get("text") or item.get("desc"),
+    "likes": item.get("diggCount") or item.get("stats", {}).get("diggCount", 0),
+    "comments": item.get("commentCount") or item.get("stats", {}).get("commentCount", 0),
+    "shares": item.get("shareCount") or item.get("stats", {}).get("shareCount", 0),
+    "saves": item.get("collectCount", 0),
+    "views": item.get("playCount") or item.get("stats", {}).get("playCount", 0),
+    "url": item.get("webVideoUrl") or f"https://www.tiktok.com/@{item.get('authorMeta', {}).get('name')}/video/{item.get('id')}",
+    "author": item.get("authorMeta", {}).get("name") or item.get("author"),
+}
+```
+
+**Instagram field mapping** (from Apify actor output → raw_posts):
+
+```python
+{
+    "post_id": item.get("id"),
+    "caption": item.get("caption"),
+    "likes": item.get("likesCount", 0),
+    "comments": item.get("commentsCount", 0),
+    "shares": 0,  # not available from IG hashtag scraper
+    "saves": 0,    # not available from IG hashtag scraper
+    "views": item.get("videoViewCount", 0),
+    "url": item.get("url"),
+    "author": item.get("ownerUsername"),
+}
+```
+
+**Error handling**:
+
+- If an Apify run fails, log the error and continue with next hashtag
+- If rate limited, implement exponential backoff (start 30s, max 5min)
+- Use `INSERT OR IGNORE` to handle duplicate post IDs across hashtags
+
+**Budget notes**:
+
+- Use `maxItems` parameter in Apify actor input to cap results per hashtag
+- Default 100 per hashtag, controllable via `--max-posts`
+- Log Apify credit usage per run for cost tracking
+
+---
+
+### Step 3: LLM Place Extraction
+
+**Input**: Batches of raw post captions from SQLite (where `processed = FALSE`)
+
+**Batch size**: 20 captions per LLM call
+
+**Action**: Send caption batch to OpenRouter for place extraction.
+
+**Prompt**:
+
+```
+You are extracting specific place names from social media captions about {city_name}.
+
+For each caption, extract any SPECIFIC, NAMED places mentioned — restaurants, cafes,
+bars, clubs, markets, neighborhoods, viewpoints, parks, museums, galleries, shops,
+or activities.
+
+Rules:
+- Only extract places with actual names (not "this cute cafe" without a name)
+- Include the neighborhood/area if mentioned alongside the place
+- Classify each place by type
+- Skip generic city landmarks unless the caption frames them in a non-obvious way
+  (e.g., "the rooftop bar behind the Grand Bazaar" — extract the bar, not the bazaar)
+
+Captions:
+{numbered_captions}
+
+Return ONLY a JSON array of objects. Each object:
+{{
+  "caption_index": <int>,
+  "places": [
+    {{
+      "name": "<place name as mentioned>",
+      "type": "<restaurant|cafe|bar|club|market|neighborhood|viewpoint|park|museum|gallery|shop|activity|street|other>"
+    }}
+  ]
+}}
+
+If a caption mentions no specific named place, return an empty places array for it.
+```
+
+**Post-processing**:
+
+- Mark each processed caption as `processed = TRUE` in `raw_posts`
+- For each extracted place, upsert into `places` table:
+  - If place name already exists (case-insensitive match for this city): increment `mention_count`, append post ID to `source_post_ids`
+  - If new: insert with `mention_count = 1`
+
+---
+
+### Step 4: Deduplication + Scoring
+
+**Run after all extraction is complete.**
+
+**Fuzzy dedup logic**:
+
+- Normalize place names: lowercase, strip leading "the ", trim whitespace
+- Group places with similar names (Levenshtein distance ≤ 3 OR one name contains the other)
+- Merge groups: keep the most common spelling, sum mention counts, merge source post IDs
+- Use an LLM call for ambiguous cases (batch of candidate dupes → ask which are the same place)
+
+**Virality score formula**:
+
+```python
+def calculate_virality_score(place_id: int, db: sqlite3.Connection) -> float:
+    """
+    Score based on engagement signals from all source posts.
+    Weights saves and shares higher than likes (intent signals > passive signals).
+    """
+    source_post_ids = json.loads(place.source_post_ids)
+    posts = fetch_posts_by_ids(db, source_post_ids)
+
+    total_score = 0.0
+    for post in posts:
+        engagement = (
+            post["saves"] * 5.0 +
+            post["shares"] * 4.0 +
+            post["comments"] * 2.0 +
+            post["likes"] * 1.0
+        )
+        # Normalize by views to get engagement rate (avoid div by zero)
+        views = max(post["views"], 1)
+        rate = engagement / views
+        total_score += rate
+
+    # Factor in mention count (more posts mentioning = stronger signal)
+    mention_bonus = math.log(len(posts) + 1)
+
+    return round(total_score * mention_bonus, 4)
+```
+
+Update `virality_score` for all places in the database.
+
+---
+
+### Step 5: Tourist Trap Filter
+
+**Input**: All places for the city from the `places` table.
+
+**Action**: Send place names + types to OpenRouter for classification.
+
+**Prompt**:
+
+```
+You are a travel expert who knows the difference between tourist traps and
+genuinely interesting places in {city_name}.
+
+Review this list of places and mark each as a tourist trap or not.
+A tourist trap is a place that:
+- Appears in every single guidebook and top-10 list
+- Is primarily visited by tourists, not locals
+- Is famous for being famous rather than being genuinely great
+- Charges tourist-inflated prices for mediocre quality
+
+A place is NOT a tourist trap if:
+- It's popular but genuinely beloved by locals too
+- It's a hidden gem that went viral on social media
+- It's a newer/trendy spot that hasn't been overexposed yet
+
+Places:
+{numbered_place_list}
+
+Return ONLY a JSON array of objects:
+[{{"index": 0, "is_tourist_trap": true/false, "reason": "brief reason"}}]
+```
+
+**Post-processing**:
+
+- Update `is_tourist_trap` boolean in `places` table
+
+---
+
+## Output
+
+After pipeline completion, print a summary to stdout:
+
+```
+=== Atlasi Place Discovery: Istanbul ===
+
+Scraped: 1,247 posts across 15 hashtags
+Extracted: 89 unique places
+Tourist traps filtered: 12
+
+Top 20 places by virality score (excluding tourist traps):
+ 1. Mikla Restaurant (restaurant) — score: 4.2381
+ 2. Arkaoda (bar) — score: 3.9102
+ 3. Balat neighborhood (neighborhood) — score: 3.7744
+ ...
+
+Full results in: places.db
+```
+
+Also support a `--export-csv` flag that dumps the places table (non-tourist-trap, sorted by score) to a CSV file.
+
+---
+
+## File Structure
+
+```
+atlasi-place-discovery/
+├── discover.py          # CLI entrypoint + orchestrator
+├── config.py            # .env loading, defaults, constants
+├── db.py                # SQLite setup, migrations, queries
+├── hashtags.py          # Step 1: hashtag generation
+├── scraper.py           # Step 2: Apify scraping (TikTok + IG)
+├── extractor.py         # Step 3: LLM place extraction
+├── scorer.py            # Step 4: dedup + scoring
+├── filter.py            # Step 5: tourist trap filter
+├── llm.py               # OpenRouter API wrapper
+├── requirements.txt     # apify-client, requests, python-dotenv, python-Levenshtein
+├── .env.example         # template for env vars
+├── places.db            # SQLite database (gitignored)
+└── README.md            # setup + usage instructions
+```
+
+---
+
+## Error Handling & Resilience
+
+- **Checkpoint-based**: each step marks its work as done in the DB, so reruns skip completed work
+- **Retry logic**: all API calls (Apify + OpenRouter) retry 3x with exponential backoff
+- **Graceful failure**: if a single hashtag scrape fails, log and continue with the rest
+- **Idempotent**: running the same city twice adds new data without duplicating existing posts
+- **Progress logging**: print step-by-step progress to stdout (e.g., "Scraping hashtag 3/15: istanbulfoodie...")
+
+---
+
+## Dependencies (`requirements.txt`)
+
+```
+apify-client>=1.6.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+python-Levenshtein>=0.23.0
+```
+
+---
+
+## Future Enhancements (not in v1)
+
+- Google Maps / Nominatim validation to confirm places exist and get coordinates
+- Auto-generate TikTok slideshow copy per place
+- Batch processing for multiple cities
+- Scheduled reruns to track trending places over time
+- Web UI dashboard for browsing results
