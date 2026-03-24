@@ -1,0 +1,11 @@
+places.db
+.env
+.DS_Store
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
