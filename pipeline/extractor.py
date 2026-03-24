@@ -78,13 +78,19 @@ def _process_batch(
     places_extracted = 0
 
     for item in results:
+        if not isinstance(item, dict):
+            continue
         caption_index = item.get("caption_index")
         places = item.get("places", [])
+        if not isinstance(places, list):
+            continue
         if caption_index is None or caption_index not in index_to_post:
             continue
 
         post = index_to_post[caption_index]
         for place in places:
+            if not isinstance(place, dict):
+                continue
             name = place.get("name", "").strip()
             if not name:
                 continue

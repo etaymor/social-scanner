@@ -9,7 +9,7 @@ import logging
 import sqlite3
 
 from .db import insert_hashtags
-from .llm import call_llm_json
+from .llm import call_llm_json, LLMError
 
 log = logging.getLogger(__name__)
 
@@ -55,9 +55,13 @@ def generate_hashtags(
 
     # --- LLM-generated hashtags -------------------------------------------
     prompt = PROMPT_TEMPLATE.format(city_name=city_name)
-    data = call_llm_json(prompt)
-    raw = data.get("hashtags") if isinstance(data, dict) else None
-    llm_tags: list[str] = list(raw) if isinstance(raw, list) else []
+    try:
+        data = call_llm_json(prompt)
+        raw = data.get("hashtags") if isinstance(data, dict) else None
+        llm_tags: list[str] = list(raw) if isinstance(raw, list) else []
+    except LLMError:
+        log.exception("LLM call failed for hashtag generation; using universal tags only")
+        llm_tags = []
     log.info("LLM returned %d hashtags", len(llm_tags))
 
     # --- Hardcoded universal hashtags -------------------------------------

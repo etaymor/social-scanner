@@ -121,7 +121,9 @@ def _ask_llm_to_confirm_groups(
         log.warning("LLM dedup confirmation failed; skipping merge for this group")
         return []
 
-    raw_groups: list[list[int]] = result.get("groups", [])
+    raw_groups: list[list[int]] = result.get("groups", []) if isinstance(result, dict) else []
+    if not isinstance(raw_groups, list):
+        raw_groups = []
     confirmed: list[list[int]] = []
 
     for g in raw_groups:
@@ -175,9 +177,15 @@ def _perform_dedup(
 
         confirmed_subgroups = _ask_llm_to_confirm_groups(group_places, city_name)
 
+        merged_ids_set: set[int] = set()
+
         for subgroup_ids in confirmed_subgroups:
+            remaining_ids = [pid for pid in subgroup_ids if pid not in merged_ids_set]
+            if len(remaining_ids) < 2:
+                continue
+
             # Pick the place with the highest mention count as canonical
-            subgroup_places = [place_by_id[pid] for pid in subgroup_ids]
+            subgroup_places = [place_by_id[pid] for pid in remaining_ids]
             canonical = max(subgroup_places, key=lambda p: p["mention_count"])
             merge_ids = [p["id"] for p in subgroup_places if p["id"] != canonical["id"]]
 
@@ -191,6 +199,7 @@ def _perform_dedup(
             )
 
             db.merge_places(conn, canonical["id"], merge_ids)
+            merged_ids_set.update(merge_ids)
             total_merged += len(merge_ids)
 
     if total_merged:

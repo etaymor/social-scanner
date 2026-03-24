@@ -7,8 +7,25 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from apify_client import ApifyClient
 
+try:
+    from apify_client.errors import ApifyClientError
+except ImportError:
+    from apify_client._errors import ApifyApiError as ApifyClientError  # v1.x
+
+try:
+    import impit
+    _IMPIT_HTTP_ERROR: type[Exception] | None = impit.HTTPError
+except ImportError:
+    _IMPIT_HTTP_ERROR = None
+
 import config
 from . import db
+
+_SCRAPE_ERRORS: tuple[type[Exception], ...] = (
+    requests.RequestException, ApifyClientError, KeyError, ValueError,
+)
+if _IMPIT_HTTP_ERROR is not None:
+    _SCRAPE_ERRORS = (*_SCRAPE_ERRORS, _IMPIT_HTTP_ERROR)
 
 log = logging.getLogger(__name__)
 
@@ -200,7 +217,7 @@ def scrape_posts(
                 )
                 total_inserted += inserted
 
-            except (requests.RequestException, KeyError, ValueError):
+            except _SCRAPE_ERRORS:
                 log.exception(
                     "Failed to scrape #%s (%s) for %s", tag, platform, city_name,
                 )

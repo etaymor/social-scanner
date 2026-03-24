@@ -7,7 +7,12 @@ from config import DB_PATH
 
 
 def get_connection(db_path: str | Path | None = None) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path or DB_PATH)
+    effective = db_path if db_path else DB_PATH
+    if str(effective) == ":memory:":
+        resolved = ":memory:"
+    else:
+        resolved = str(Path(effective).expanduser().resolve())
+    conn = sqlite3.connect(resolved)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=5000")
