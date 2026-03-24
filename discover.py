@@ -80,7 +80,8 @@ def export_csv(conn: sqlite3.Connection, city_id: int, city_name: str, filepath:
     return filepath
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """Build and return the CLI argument parser."""
     parser = argparse.ArgumentParser(
         description="Atlasi Place Discovery Pipeline — discover trending places from social media",
     )
@@ -97,6 +98,11 @@ def main() -> None:
                         help="Export results to CSV file")
     parser.add_argument("--verbose", action="store_true", help="Verbose output")
     parser.add_argument("--quiet", action="store_true", help="Minimal output")
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
 
     setup_logging(args.verbose, args.quiet)

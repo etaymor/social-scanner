@@ -238,29 +238,23 @@ class TestCategoryExtraction:
 
 class TestCLICategory:
     def test_category_argument_accepted(self):
-        """--category with valid value should parse successfully."""
-        import argparse
-        parser = argparse.ArgumentParser()
-        parser.add_argument("--city", required=True)
-        parser.add_argument("--category", choices=sorted(config.VALID_CATEGORIES))
+        """--category with valid value should parse successfully via real CLI parser."""
+        from discover import build_parser
+        parser = build_parser()
         args = parser.parse_args(["--city", "Istanbul", "--category", "nightlife"])
         assert args.category == "nightlife"
 
     def test_category_argument_optional(self):
-        """--category omitted should default to None."""
-        import argparse
-        parser = argparse.ArgumentParser()
-        parser.add_argument("--city", required=True)
-        parser.add_argument("--category", choices=sorted(config.VALID_CATEGORIES), default=None)
+        """--category omitted should default to None via real CLI parser."""
+        from discover import build_parser
+        parser = build_parser()
         args = parser.parse_args(["--city", "Istanbul"])
         assert args.category is None
 
     def test_invalid_category_rejected(self):
-        """--category with invalid value should raise error."""
-        import argparse
-        parser = argparse.ArgumentParser()
-        parser.add_argument("--city", required=True)
-        parser.add_argument("--category", choices=sorted(config.VALID_CATEGORIES))
+        """--category with invalid value should raise error via real CLI parser."""
+        from discover import build_parser
+        parser = build_parser()
         with pytest.raises(SystemExit):
             parser.parse_args(["--city", "Istanbul", "--category", "invalid"])
 
@@ -270,56 +264,98 @@ class TestCLICategory:
 # ---------------------------------------------------------------------------
 
 class TestDashboardCategoryFilter:
-    def test_get_places_page_with_category(self, conn, city_id):
-        """get_places_page with category should filter results."""
-        # Insert places with different categories
+    @pytest.fixture
+    def dashboard_client(self, conn, city_id):
+        """Flask test client wired to the in-memory test database."""
+        # Wrap conn so dashboard's conn.close() is a no-op (keeps in-memory db alive)
+        class _UnclosableConn:
+            def __init__(self, real):
+                self._real = real
+            def close(self):
+                pass
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        with patch("dashboard.db.get_connection", return_value=_UnclosableConn(conn)):
+            from dashboard import app
+            app.config["TESTING"] = True
+            with app.test_client() as client:
+                yield client, city_id
+
+    def test_dashboard_filters_by_category(self, conn, city_id, dashboard_client):
+        """Dashboard route with ?category= should filter results."""
+        client, cid = dashboard_client
         conn.execute(
             "INSERT INTO places (city_id, name, type, category) VALUES (?, 'Cafe A', 'cafe', 'food_and_drink')",
-            (city_id,),
+            (cid,),
         )
         conn.execute(
             "INSERT INTO places (city_id, name, type, category) VALUES (?, 'Bar B', 'bar', 'nightlife')",
-            (city_id,),
+            (cid,),
         )
         conn.execute(
             "INSERT INTO places (city_id, name, type, category) VALUES (?, 'Cafe C', 'cafe', 'food_and_drink')",
-            (city_id,),
+            (cid,),
         )
         conn.commit()
 
-        # Filter by food_and_drink
-        places, total = db.get_places_page(conn, city_id, category="food_and_drink")
-        assert total == 2
-        assert len(places) == 2
-        assert all(p["category"] == "food_and_drink" for p in places)
+        # API endpoint filtered by food_and_drink
+        resp = client.get(f"/api/places?city_id={cid}&category=food_and_drink")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["total"] == 2
+        assert len(data["places"]) == 2
+        assert all(p["category"] == "food_and_drink" for p in data["places"])
 
-        # Filter by nightlife
-        places, total = db.get_places_page(conn, city_id, category="nightlife")
-        assert total == 1
-        assert places[0]["name"] == "Bar B"
+        # API endpoint filtered by nightlife
+        resp = client.get(f"/api/places?city_id={cid}&category=nightlife")
+        data = resp.get_json()
+        assert data["total"] == 1
+        assert data["places"][0]["name"] == "Bar B"
 
         # No filter returns all
-        places, total = db.get_places_page(conn, city_id)
-        assert total == 3
+        resp = client.get(f"/api/places?city_id={cid}")
+        data = resp.get_json()
+        assert data["total"] == 3
 
-    def test_get_places_page_category_pagination(self, conn, city_id):
-        """Category filter should work correctly with pagination."""
+    def test_dashboard_category_pagination(self, conn, city_id, dashboard_client):
+        """Category filter should work with pagination, preserving filter across pages."""
+        client, cid = dashboard_client
         for i in range(5):
             conn.execute(
                 "INSERT INTO places (city_id, name, type, category, virality_score) VALUES (?, ?, 'cafe', 'food_and_drink', ?)",
-                (city_id, f"Cafe {i}", 10 - i),
+                (cid, f"Cafe {i}", 10 - i),
             )
         conn.commit()
 
-        # Page 1 of 2 (per_page=3)
-        places, total = db.get_places_page(conn, city_id, page=1, per_page=3, category="food_and_drink")
-        assert total == 5
-        assert len(places) == 3
+        # Page 1 (per_page=3)
+        resp = client.get(f"/api/places?city_id={cid}&category=food_and_drink&per_page=3&page=1")
+        data = resp.get_json()
+        assert data["total"] == 5
+        assert len(data["places"]) == 3
 
-        # Page 2 of 2
-        places, total = db.get_places_page(conn, city_id, page=2, per_page=3, category="food_and_drink")
-        assert total == 5
-        assert len(places) == 2
+        # Page 2 still filtered by category
+        resp = client.get(f"/api/places?city_id={cid}&category=food_and_drink&per_page=3&page=2")
+        data = resp.get_json()
+        assert data["total"] == 5
+        assert len(data["places"]) == 2
+        assert all(p["category"] == "food_and_drink" for p in data["places"])
+
+    def test_dashboard_html_pagination_preserves_category(self, conn, city_id, dashboard_client):
+        """HTML dashboard pagination links should include category query param."""
+        client, cid = dashboard_client
+        for i in range(60):
+            conn.execute(
+                "INSERT INTO places (city_id, name, type, category, virality_score) VALUES (?, ?, 'cafe', 'food_and_drink', ?)",
+                (cid, f"Cafe {i}", 100 - i),
+            )
+        conn.commit()
+
+        resp = client.get(f"/?city_id={cid}&category=food_and_drink")
+        assert resp.status_code == 200
+        html = resp.data.decode()
+        # Pagination link to page 2 should preserve the category filter
+        assert "category=food_and_drink" in html
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +384,105 @@ class TestSchemaMigration:
         cols = conn.execute("PRAGMA table_info(places)").fetchall()
         col_names = [c["name"] for c in cols]
         assert col_names.count("category") == 1
+
+    def test_migration_adds_category_to_legacy_schema(self):
+        """init_db should add category column to pre-existing tables and preserve data."""
+        # Create a fresh connection with legacy schema (no category column)
+        legacy_conn = db.get_connection(":memory:")
+        legacy_conn.executescript("""
+            CREATE TABLE cities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE hashtags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                city_id INTEGER NOT NULL REFERENCES cities(id) ON DELETE CASCADE,
+                tag TEXT NOT NULL,
+                platform TEXT NOT NULL CHECK(platform IN ('tiktok', 'instagram')),
+                scrape_status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(city_id, tag, platform)
+            );
+            CREATE TABLE raw_posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                city_id INTEGER NOT NULL REFERENCES cities(id) ON DELETE CASCADE,
+                platform TEXT NOT NULL CHECK(platform IN ('tiktok', 'instagram')),
+                post_id TEXT NOT NULL,
+                caption TEXT,
+                likes INTEGER DEFAULT 0,
+                comments INTEGER DEFAULT 0,
+                shares INTEGER DEFAULT 0,
+                saves INTEGER DEFAULT 0,
+                views INTEGER DEFAULT 0,
+                url TEXT,
+                author TEXT,
+                created_at TIMESTAMP,
+                scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                processed BOOLEAN DEFAULT FALSE,
+                UNIQUE(platform, post_id)
+            );
+            CREATE TABLE places (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                city_id INTEGER NOT NULL REFERENCES cities(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                type TEXT NOT NULL DEFAULT 'other',
+                mention_count INTEGER DEFAULT 1,
+                virality_score REAL DEFAULT 0.0,
+                is_tourist_trap BOOLEAN DEFAULT FALSE,
+                sample_caption TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(city_id, name)
+            );
+            CREATE TABLE place_posts (
+                place_id INTEGER NOT NULL REFERENCES places(id) ON DELETE CASCADE,
+                post_id INTEGER NOT NULL REFERENCES raw_posts(id) ON DELETE CASCADE,
+                PRIMARY KEY (place_id, post_id)
+            );
+            CREATE TABLE post_hashtags (
+                post_id INTEGER NOT NULL REFERENCES raw_posts(id) ON DELETE CASCADE,
+                hashtag_id INTEGER NOT NULL REFERENCES hashtags(id) ON DELETE CASCADE,
+                PRIMARY KEY (post_id, hashtag_id)
+            );
+        """)
+
+        # Insert some legacy data
+        legacy_conn.execute("INSERT INTO cities (name) VALUES ('Istanbul')")
+        legacy_conn.execute(
+            "INSERT INTO hashtags (city_id, tag, platform) VALUES (1, 'istanbulfood', 'tiktok')"
+        )
+        legacy_conn.execute(
+            "INSERT INTO places (city_id, name, type) VALUES (1, 'Blue Mosque', 'temple')"
+        )
+        legacy_conn.commit()
+
+        # Run migration
+        db.init_db(legacy_conn)
+
+        # Verify category column now exists on both tables
+        for table in ("places", "hashtags"):
+            cols = legacy_conn.execute(f"PRAGMA table_info({table})").fetchall()
+            col_names = {c["name"] for c in cols}
+            assert "category" in col_names, f"{table} missing category column after migration"
+
+        # Verify pre-existing rows survived with null category
+        place = legacy_conn.execute("SELECT * FROM places WHERE name = 'Blue Mosque'").fetchone()
+        assert place is not None
+        assert place["name"] == "Blue Mosque"
+        assert place["type"] == "temple"
+        assert place["category"] is None
+
+        hashtag = legacy_conn.execute("SELECT * FROM hashtags WHERE tag = 'istanbulfood'").fetchone()
+        assert hashtag is not None
+        assert hashtag["category"] is None
+
+        # Running init_db again should be idempotent on the migrated schema
+        db.init_db(legacy_conn)
+        cols = legacy_conn.execute("PRAGMA table_info(places)").fetchall()
+        col_names = [c["name"] for c in cols]
+        assert col_names.count("category") == 1
+
+        legacy_conn.close()
 
 
 # ---------------------------------------------------------------------------
