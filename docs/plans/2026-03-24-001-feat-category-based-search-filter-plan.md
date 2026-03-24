@@ -1,7 +1,7 @@
 ---
 title: "feat: Add Category-Based Search Filter to Discovery Pipeline"
 type: feat
-status: active
+status: completed
 date: 2026-03-24
 ---
 
