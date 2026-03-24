@@ -16,10 +16,13 @@ Rules:
 - Only extract places with actual names (not "this cute cafe" without a name)
 - Include the neighborhood/area if mentioned alongside the place
 - Classify each place by type
+- Assign each place a category from this list: food_and_drink, places_to_stay, sights_and_attractions, nightlife, shopping, outdoors_and_nature, arts_and_culture, activities_and_experiences
 - Skip generic city landmarks unless the caption frames them in a non-obvious way
 
+Valid types: restaurant, cafe, bar, club, market, neighborhood, viewpoint, park, museum, gallery, shop, activity, street, hotel, hostel, tour, class, beach, temple, spa, brewery, lounge, bakery, garden, theater, monument, boutique, trail, workshop, other
+
 Return ONLY a JSON object with a "results" key containing an array of objects. Each object:
-{{"caption_index": <int>, "places": [{{"name": "<place name>", "type": "<restaurant|cafe|bar|club|market|neighborhood|viewpoint|park|museum|gallery|shop|activity|street|other>"}}]}}
+{{"caption_index": <int>, "places": [{{"name": "<place name>", "type": "<type>", "category": "<category>"}}]}}
 
 If a caption mentions no specific named place, return an empty places array for it."""
 
@@ -51,6 +54,18 @@ def _validate_place_type(place_type: str) -> str:
     """Normalise and validate a place type, falling back to 'other'."""
     cleaned = place_type.strip().lower() if place_type else "other"
     return cleaned if cleaned in config.VALID_PLACE_TYPES else "other"
+
+
+def _validate_category(category: str | None, place_type: str) -> str:
+    """Validate a category, falling back to TYPE_TO_CATEGORY then default."""
+    if category:
+        cleaned = category.strip().lower().replace(" ", "_")
+        if cleaned in config.VALID_CATEGORIES:
+            return cleaned
+    # Fallback: derive from place type
+    if place_type in config.TYPE_TO_CATEGORY:
+        return config.TYPE_TO_CATEGORY[place_type]
+    return "sights_and_attractions"
 
 
 def _process_batch(
@@ -95,6 +110,7 @@ def _process_batch(
             if not name:
                 continue
             place_type = _validate_place_type(place.get("type", "other"))
+            category = _validate_category(place.get("category"), place_type)
             db.upsert_place(
                 conn,
                 city_id,
@@ -102,9 +118,10 @@ def _process_batch(
                 place_type,
                 post["id"],
                 (post["caption"] or "")[:500],
+                category=category,
             )
             places_extracted += 1
-            log.debug("  -> %s (%s)", name, place_type)
+            log.debug("  -> %s (%s, %s)", name, place_type, category)
 
     return places_extracted
 

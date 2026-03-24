@@ -192,7 +192,34 @@
         .type-shop { background: #0c4a6e20; color: #38bdf8; border: 1px solid #0c4a6e40; }
         .type-activity { background: #365314; color: #a3e635; border: 1px solid #4d7c0f40; }
         .type-street { background: #27272a; color: #a1a1aa; border: 1px solid #3f3f4640; }
+        .type-hotel { background: #1e3a5f20; color: #93c5fd; border: 1px solid #1e3a5f40; }
+        .type-hostel { background: #1e3a5f20; color: #7dd3fc; border: 1px solid #1e3a5f40; }
+        .type-tour { background: #365314; color: #bef264; border: 1px solid #4d7c0f40; }
+        .type-class { background: #365314; color: #d9f99d; border: 1px solid #4d7c0f40; }
+        .type-beach { background: #052e1620; color: #5eead4; border: 1px solid #052e1640; }
+        .type-temple { background: #451a0320; color: #fdba74; border: 1px solid #451a0340; }
+        .type-spa { background: #831843; color: #fbcfe8; border: 1px solid #9d174d40; }
+        .type-brewery { background: #581c8720; color: #d8b4fe; border: 1px solid #581c8740; }
+        .type-lounge { background: #581c8720; color: #e9d5ff; border: 1px solid #581c8740; }
+        .type-bakery { background: #78350f20; color: #fde68a; border: 1px solid #78350f40; }
+        .type-garden { background: #052e1620; color: #6ee7b7; border: 1px solid #052e1640; }
+        .type-theater { background: #451a0320; color: #fca5a5; border: 1px solid #451a0340; }
+        .type-monument { background: #27272a; color: #d4d4d8; border: 1px solid #3f3f4640; }
+        .type-boutique { background: #0c4a6e20; color: #7dd3fc; border: 1px solid #0c4a6e40; }
+        .type-trail { background: #052e1620; color: #86efac; border: 1px solid #052e1640; }
+        .type-workshop { background: #365314; color: #a3e635; border: 1px solid #4d7c0f40; }
         .type-other { background: #1a1a1a; color: #71717a; border: 1px solid #2a2a2a; }
+
+        .category-badge {
+            display: inline-block;
+            padding: 0.15rem 0.5rem;
+            border-radius: 9999px;
+            font-size: 0.7rem;
+            font-weight: 500;
+            background: #1a1a2e;
+            color: #818cf8;
+            border: 1px solid #2a2a4e;
+        }
 
         .score {
             font-variant-numeric: tabular-nums;
@@ -284,6 +311,12 @@
 
         <div class="filters">
             <span class="filter-label">Filter:</span>
+            <select id="categoryFilter" onchange="applyCategoryFilter()">
+                <option value="">All categories</option>
+                {% for c in place_categories %}
+                <option value="{{ c }}" {{ 'selected' if c == category_filter else '' }}>{{ category_labels[c].label if c in category_labels else c }}</option>
+                {% endfor %}
+            </select>
             <select id="typeFilter" onchange="filterTable()">
                 <option value="">All types</option>
                 {% for t in place_types %}
@@ -305,8 +338,9 @@
                     <th class="rank">#</th>
                     <th>Name</th>
                     <th>Type</th>
-                    <th onclick="sortTable(3)">Score</th>
-                    <th onclick="sortTable(4)">Mentions</th>
+                    <th>Category</th>
+                    <th onclick="sortTable(4)">Score</th>
+                    <th onclick="sortTable(5)">Mentions</th>
                     <th>Status</th>
                     <th>Sample Caption</th>
                 </tr>
@@ -317,6 +351,7 @@
                     <td class="rank">{{ loop.index }}</td>
                     <td class="place-name">{{ p.name }}</td>
                     <td><span class="place-type type-{{ p.type }}">{{ p.type }}</span></td>
+                    <td>{% if p.category %}<span class="category-badge">{{ category_labels[p.category].label if p.category in category_labels else p.category }}</span>{% else %}—{% endif %}</td>
                     <td class="score">{{ "%.4f"|format(p.virality_score) }}</td>
                     <td class="mentions">{{ p.mention_count }}</td>
                     <td>{% if p.is_tourist_trap %}<span class="trap-badge">TRAP</span>{% endif %}</td>
@@ -328,12 +363,12 @@
         {% if total_pages > 1 %}
         <div style="display:flex; gap:0.5rem; justify-content:center; margin-top:1.5rem; align-items:center;">
             {% if page > 1 %}
-            <a href="/?city_id={{ city_id }}&page={{ page - 1 }}&type={{ type_filter }}&trap={{ trap_filter }}&search={{ search }}"
+            <a href="/?city_id={{ city_id }}&page={{ page - 1 }}&category={{ category_filter }}&type={{ type_filter }}&trap={{ trap_filter }}&search={{ search }}"
                style="padding:0.4rem 0.8rem; background:#1a1a1a; border:1px solid #2a2a2a; border-radius:6px; color:#a1a1aa; text-decoration:none; font-size:0.85rem;">Prev</a>
             {% endif %}
             <span style="color:#71717a; font-size:0.85rem;">Page {{ page }} of {{ total_pages }}</span>
             {% if page < total_pages %}
-            <a href="/?city_id={{ city_id }}&page={{ page + 1 }}&type={{ type_filter }}&trap={{ trap_filter }}&search={{ search }}"
+            <a href="/?city_id={{ city_id }}&page={{ page + 1 }}&category={{ category_filter }}&type={{ type_filter }}&trap={{ trap_filter }}&search={{ search }}"
                style="padding:0.4rem 0.8rem; background:#1a1a1a; border:1px solid #2a2a2a; border-radius:6px; color:#a1a1aa; text-decoration:none; font-size:0.85rem;">Next</a>
             {% endif %}
         </div>
@@ -354,6 +389,18 @@
     </div>
 
     <script>
+        function applyCategoryFilter() {
+            const category = document.getElementById('categoryFilter').value;
+            const params = new URLSearchParams(window.location.search);
+            if (category) {
+                params.set('category', category);
+            } else {
+                params.delete('category');
+            }
+            params.set('page', '1');
+            window.location.search = params.toString();
+        }
+
         function filterTable() {
             const typeVal = document.getElementById('typeFilter').value.toLowerCase();
             const trapVal = document.getElementById('trapFilter').value.toLowerCase();

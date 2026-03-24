@@ -94,6 +94,14 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_place_posts_place ON place_posts(place_id);
         CREATE INDEX IF NOT EXISTS idx_place_posts_post ON place_posts(post_id);
     """)
+
+    # Migrations — add category columns (safe for existing databases)
+    for table in ("places", "hashtags"):
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN category TEXT DEFAULT NULL")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
     conn.commit()
 
 
@@ -115,17 +123,24 @@ def reset_city(conn: sqlite3.Connection, city_id: int) -> None:
 
 # --- Hashtag helpers ---
 
-def insert_hashtags(conn: sqlite3.Connection, city_id: int, tags: list[str]) -> None:
+def insert_hashtags(conn: sqlite3.Connection, city_id: int, tags: list[str],
+                    category: str | None = None) -> None:
     for tag in tags:
         for platform in ("tiktok", "instagram"):
             conn.execute(
-                "INSERT OR IGNORE INTO hashtags (city_id, tag, platform) VALUES (?, ?, ?)",
-                (city_id, tag, platform),
+                "INSERT OR IGNORE INTO hashtags (city_id, tag, platform, category) VALUES (?, ?, ?, ?)",
+                (city_id, tag, platform, category),
             )
     conn.commit()
 
 
-def get_pending_hashtags(conn: sqlite3.Connection, city_id: int) -> list[sqlite3.Row]:
+def get_pending_hashtags(conn: sqlite3.Connection, city_id: int,
+                         category: str | None = None) -> list[sqlite3.Row]:
+    if category:
+        return conn.execute(
+            "SELECT * FROM hashtags WHERE city_id = ? AND scrape_status = 'pending' AND category = ?",
+            (city_id, category),
+        ).fetchall()
     return conn.execute(
         "SELECT * FROM hashtags WHERE city_id = ? AND scrape_status = 'pending'",
         (city_id,),
@@ -202,7 +217,8 @@ def mark_posts_processed(conn: sqlite3.Connection, post_ids: list[int]) -> None:
 # --- Place helpers ---
 
 def upsert_place(conn: sqlite3.Connection, city_id: int, name: str,
-                 place_type: str, post_id: int, sample_caption: str = None) -> int:
+                 place_type: str, post_id: int, sample_caption: str = None,
+                 category: str | None = None) -> int:
     """Insert or update a place, link it to the post. Returns place id."""
     import re
     name = re.sub(r"<[^>]+>", "", name)[:200].strip()
@@ -215,14 +231,20 @@ def upsert_place(conn: sqlite3.Connection, city_id: int, name: str,
 
     if row:
         place_id = row["id"]
-        conn.execute(
-            "UPDATE places SET mention_count = mention_count + 1 WHERE id = ?",
-            (place_id,),
-        )
+        if category:
+            conn.execute(
+                "UPDATE places SET mention_count = mention_count + 1, category = ? WHERE id = ?",
+                (category, place_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE places SET mention_count = mention_count + 1 WHERE id = ?",
+                (place_id,),
+            )
     else:
         cur = conn.execute(
-            "INSERT INTO places (city_id, name, type, sample_caption) VALUES (?, ?, ?, ?)",
-            (city_id, name, place_type, sample_caption),
+            "INSERT INTO places (city_id, name, type, sample_caption, category) VALUES (?, ?, ?, ?, ?)",
+            (city_id, name, place_type, sample_caption, category),
         )
         place_id = cur.lastrowid
 
@@ -241,16 +263,28 @@ def get_all_places(conn: sqlite3.Connection, city_id: int) -> list[sqlite3.Row]:
 
 
 def get_places_page(conn: sqlite3.Connection, city_id: int,
-                    page: int = 1, per_page: int = 50) -> tuple[list[sqlite3.Row], int]:
+                    page: int = 1, per_page: int = 50,
+                    category: str | None = None) -> tuple[list[sqlite3.Row], int]:
     """Return a page of places and total count for pagination."""
-    total = conn.execute(
-        "SELECT COUNT(*) as cnt FROM places WHERE city_id = ?", (city_id,),
-    ).fetchone()["cnt"]
-    offset = (page - 1) * per_page
-    rows = conn.execute(
-        "SELECT * FROM places WHERE city_id = ? ORDER BY virality_score DESC LIMIT ? OFFSET ?",
-        (city_id, per_page, offset),
-    ).fetchall()
+    if category:
+        total = conn.execute(
+            "SELECT COUNT(*) as cnt FROM places WHERE city_id = ? AND category = ?",
+            (city_id, category),
+        ).fetchone()["cnt"]
+        offset = (page - 1) * per_page
+        rows = conn.execute(
+            "SELECT * FROM places WHERE city_id = ? AND category = ? ORDER BY virality_score DESC LIMIT ? OFFSET ?",
+            (city_id, category, per_page, offset),
+        ).fetchall()
+    else:
+        total = conn.execute(
+            "SELECT COUNT(*) as cnt FROM places WHERE city_id = ?", (city_id,),
+        ).fetchone()["cnt"]
+        offset = (page - 1) * per_page
+        rows = conn.execute(
+            "SELECT * FROM places WHERE city_id = ? ORDER BY virality_score DESC LIMIT ? OFFSET ?",
+            (city_id, per_page, offset),
+        ).fetchall()
     return rows, total
 
 
