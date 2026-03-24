@@ -46,7 +46,6 @@ def filter_tourist_traps(
     conn: sqlite3.Connection,
     city_id: int,
     city_name: str,
-    verbose: bool = False,
 ) -> None:
     """Classify every place for a city as a tourist trap or not."""
     places = db.get_all_places(conn, city_id)
@@ -95,22 +94,25 @@ def filter_tourist_traps(
                 trap_lookup[idx] = bool(is_trap)
 
         for i, place in enumerate(batch):
-            is_trap = trap_lookup.get(i, False)
+            if i not in trap_lookup:
+                continue
+            is_trap = trap_lookup[i]
             db.update_tourist_trap(conn, place["id"], is_trap)
-            if verbose and is_trap:
+            if is_trap:
                 reason = ""
                 for item in results:
                     if item.get("index") == i:
                         reason = item.get("reason", "")
                         break
-                log.info("  Tourist trap: %s — %s", place["name"], reason)
+                log.debug("  Tourist trap: %s — %s", place["name"], reason)
 
         conn.commit()
         log.info("Batch %d/%d committed", batch_num + 1, total_batches)
 
-    trap_count = sum(
-        1 for p in db.get_all_places(conn, city_id) if p["is_tourist_trap"]
-    )
+    trap_count = conn.execute(
+        "SELECT COUNT(*) as cnt FROM places WHERE city_id = ? AND is_tourist_trap = TRUE",
+        (city_id,),
+    ).fetchone()["cnt"]
     log.info(
         "Filtering complete for %s: %d/%d places marked as tourist traps",
         city_name, trap_count, len(places),
