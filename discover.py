@@ -9,7 +9,7 @@ import sqlite3
 import sys
 
 from pipeline import db
-from config import DEFAULT_MAX_POSTS
+from config import DEFAULT_MAX_POSTS, VALID_CATEGORIES, CATEGORIES
 from pipeline.llm import CreditsExhaustedError
 
 
@@ -30,13 +30,16 @@ def validate_city(city_name: str) -> str:
     return city
 
 
-def print_summary(conn: sqlite3.Connection, city_id: int, city_name: str) -> None:
+def print_summary(conn: sqlite3.Connection, city_id: int, city_name: str,
+                  category: str | None = None) -> None:
     stats = db.get_city_stats(conn, city_id)
     places = db.get_all_places(conn, city_id)
     non_traps = [p for p in places if not p["is_tourist_trap"]]
 
     print(f"\n{'='*50}")
     print(f"  Atlasi Place Discovery: {city_name}")
+    if category:
+        print(f"  Category: {CATEGORIES[category]['label']}")
     print(f"{'='*50}\n")
     print(f"  Scraped: {stats['posts']:,} posts across {stats['hashtags']} hashtags")
     print(f"  Extracted: {stats['places']} unique places")
@@ -46,7 +49,11 @@ def print_summary(conn: sqlite3.Connection, city_id: int, city_name: str) -> Non
     if top:
         print(f"  Top {len(top)} places by virality score (excluding tourist traps):\n")
         for i, p in enumerate(top, 1):
-            print(f"  {i:>3}. {p['name']} ({p['type']}) — score: {p['virality_score']:.4f}")
+            cat_label = ""
+            if p["category"]:
+                cat_info = CATEGORIES.get(p["category"])
+                cat_label = f" [{cat_info['label']}]" if cat_info else f" [{p['category']}]"
+            print(f"  {i:>3}. {p['name']} ({p['type']}{cat_label}) — score: {p['virality_score']:.4f}")
     else:
         print("  No places found.\n")
 
@@ -64,19 +71,23 @@ def export_csv(conn: sqlite3.Connection, city_id: int, city_name: str, filepath:
 
     with open(filepath, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["rank", "name", "type", "mention_count", "virality_score"])
+        writer.writerow(["rank", "name", "type", "category", "mention_count", "virality_score"])
         for i, p in enumerate(non_traps, 1):
-            writer.writerow([i, p["name"], p["type"], p["mention_count"], p["virality_score"]])
+            writer.writerow([i, p["name"], p["type"], p.get("category", ""),
+                             p["mention_count"], p["virality_score"]])
 
     print(f"\n  Exported {len(non_traps)} places to: {filepath}")
     return filepath
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """Build and return the CLI argument parser."""
     parser = argparse.ArgumentParser(
         description="Atlasi Place Discovery Pipeline — discover trending places from social media",
     )
     parser.add_argument("--city", required=True, help="City name to research")
+    parser.add_argument("--category", choices=sorted(VALID_CATEGORIES), default=None,
+                        help="Focus discovery on a specific category (e.g., food_and_drink, nightlife)")
     parser.add_argument("--max-posts", type=int, default=DEFAULT_MAX_POSTS,
                         help=f"Max posts per hashtag per platform (default: {DEFAULT_MAX_POSTS})")
     parser.add_argument("--skip-scrape", action="store_true",
@@ -87,6 +98,11 @@ def main() -> None:
                         help="Export results to CSV file")
     parser.add_argument("--verbose", action="store_true", help="Verbose output")
     parser.add_argument("--quiet", action="store_true", help="Minimal output")
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
 
     setup_logging(args.verbose, args.quiet)
@@ -118,8 +134,13 @@ def main() -> None:
 
         # Step 1: Hashtag Generation
         from pipeline.hashtags import generate_hashtags
-        log.info("Step 1/5: Generating hashtags for %s...", city_name)
-        tags = generate_hashtags(conn, city_id, city_name)
+        category = args.category
+        if category:
+            log.info("Step 1/5: Generating %s hashtags for %s...",
+                     CATEGORIES[category]["label"], city_name)
+        else:
+            log.info("Step 1/5: Generating hashtags for %s...", city_name)
+        tags = generate_hashtags(conn, city_id, city_name, category=category)
         log.info("Generated %d unique hashtags", len(tags))
 
         # Step 2: Apify Scraping
@@ -146,7 +167,7 @@ def main() -> None:
         filter_tourist_traps(conn, city_id, city_name)
 
         # Output
-        print_summary(conn, city_id, city_name)
+        print_summary(conn, city_id, city_name, category=category)
 
         if args.export_csv:
             export_csv(conn, city_id, city_name)
