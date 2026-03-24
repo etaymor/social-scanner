@@ -1,16 +1,13 @@
 """Step 4 — Fuzzy deduplication of places and virality scoring."""
 
-import json
 import logging
 import math
 import sqlite3
-from itertools import combinations
-
-from rapidfuzz import fuzz
+from rapidfuzz import fuzz, process as rfprocess
 
 import config
-import db
-from llm import call_llm_json, LLMError
+from . import db
+from .llm import call_llm_json, LLMError
 
 log = logging.getLogger(__name__)
 
@@ -66,25 +63,33 @@ def _find_candidate_pairs(
         normed[p["id"]] = _normalize_name(p["name"])
 
     ids = list(normed.keys())
+    names = [normed[pid] for pid in ids]
     pairs: list[tuple[int, int]] = []
 
-    for i, j in combinations(range(len(ids)), 2):
-        id_a, id_b = ids[i], ids[j]
-        na, nb = normed[id_a], normed[id_b]
+    if len(ids) < 2:
+        return pairs
 
-        # Token sort ratio check
-        score = fuzz.token_sort_ratio(na, nb)
-        if score >= config.DEDUP_SCORE_CUTOFF:
-            pairs.append((id_a, id_b))
-            continue
+    # Vectorized fuzzy matching via rapidfuzz cdist (C-optimized)
+    score_matrix = rfprocess.cdist(
+        names, names,
+        scorer=fuzz.token_sort_ratio,
+        score_cutoff=config.DEDUP_SCORE_CUTOFF,
+        workers=-1,
+    )
+    # Extract upper-triangle pairs above threshold
+    for i in range(len(ids)):
+        for j in range(i + 1, len(ids)):
+            if score_matrix[i][j] >= config.DEDUP_SCORE_CUTOFF:
+                pairs.append((ids[i], ids[j]))
+                continue
 
-        # Containment check — if one name fully contains the other, it's
-        # a strong signal even when lengths differ significantly.
-        if na in nb or nb in na:
-            longer = max(len(na), len(nb))
-            shorter = min(len(na), len(nb))
-            if longer > 0 and (shorter / longer) > config.DEDUP_RELATIVE_THRESHOLD:
-                pairs.append((id_a, id_b))
+            # Containment check for pairs not caught by token_sort_ratio
+            na, nb = names[i], names[j]
+            if na in nb or nb in na:
+                longer = max(len(na), len(nb))
+                shorter = min(len(na), len(nb))
+                if longer > 0 and (shorter / longer) > config.DEDUP_RELATIVE_THRESHOLD:
+                    pairs.append((ids[i], ids[j]))
 
     return pairs
 
@@ -137,7 +142,6 @@ def _perform_dedup(
     conn: sqlite3.Connection,
     city_id: int,
     city_name: str,
-    verbose: bool = False,
 ) -> int:
     """Find and merge duplicate places. Returns the number of places merged away."""
     places = db.get_all_places(conn, city_id)
@@ -167,9 +171,7 @@ def _perform_dedup(
 
     for group_ids in merge_groups:
         group_places = [place_by_id[pid] for pid in sorted(group_ids)]
-        if verbose:
-            names = [p["name"] for p in group_places]
-            log.info("Checking merge group: %s", names)
+        log.debug("Checking merge group: %s", [p["name"] for p in group_places])
 
         confirmed_subgroups = _ask_llm_to_confirm_groups(group_places, city_name)
 
@@ -182,12 +184,11 @@ def _perform_dedup(
             if not merge_ids:
                 continue
 
-            if verbose:
-                merge_names = [place_by_id[mid]["name"] for mid in merge_ids]
-                log.info(
-                    "Merging %s into '%s' (id=%d)",
-                    merge_names, canonical["name"], canonical["id"],
-                )
+            log.debug(
+                "Merging %s into '%s' (id=%d)",
+                [place_by_id[mid]["name"] for mid in merge_ids],
+                canonical["name"], canonical["id"],
+            )
 
             db.merge_places(conn, canonical["id"], merge_ids)
             total_merged += len(merge_ids)
@@ -208,7 +209,6 @@ def _perform_dedup(
 def _score_places(
     conn: sqlite3.Connection,
     city_id: int,
-    verbose: bool = False,
 ) -> int:
     """Calculate and store virality scores for all places. Returns count scored."""
     places = db.get_all_places(conn, city_id)
@@ -216,41 +216,56 @@ def _score_places(
         log.info("No places to score")
         return 0
 
-    scored = 0
-    for place in places:
-        place_id: int = place["id"]
-        post_ids = db.get_place_post_ids(conn, place_id)
-        posts = db.get_posts_by_ids(conn, post_ids)
+    # Single JOIN query to get all engagement data for all places in the city
+    rows = conn.execute(
+        """SELECT p.id AS place_id, p.name,
+                  COALESCE(rp.saves, 0) AS saves,
+                  COALESCE(rp.shares, 0) AS shares,
+                  COALESCE(rp.comments, 0) AS comments_count,
+                  COALESCE(rp.likes, 0) AS likes,
+                  COALESCE(rp.views, 0) AS views
+           FROM places p
+           LEFT JOIN place_posts pp ON pp.place_id = p.id
+           LEFT JOIN raw_posts rp ON rp.id = pp.post_id
+           WHERE p.city_id = ?""",
+        (city_id,),
+    ).fetchall()
 
-        if not posts:
-            db.update_virality_score(conn, place_id, 0.0)
-            continue
-
-        total_score = 0.0
-        for post in posts:
+    # Aggregate per place
+    place_data: dict[int, dict] = {}
+    for row in rows:
+        pid = row["place_id"]
+        if pid not in place_data:
+            place_data[pid] = {"name": row["name"], "total_score": 0.0, "post_count": 0}
+        if row["likes"] is not None:  # has a linked post
             engagement = (
-                (post["saves"] or 0) * config.WEIGHT_SAVES
-                + (post["shares"] or 0) * config.WEIGHT_SHARES
-                + (post["comments"] or 0) * config.WEIGHT_COMMENTS
-                + (post["likes"] or 0) * config.WEIGHT_LIKES
+                row["saves"] * config.WEIGHT_SAVES
+                + row["shares"] * config.WEIGHT_SHARES
+                + row["comments_count"] * config.WEIGHT_COMMENTS
+                + row["likes"] * config.WEIGHT_LIKES
             )
-            views = max(post["views"] or 0, 1)
-            rate = engagement / views
-            total_score += rate
+            views = max(row["views"], 1)
+            place_data[pid]["total_score"] += engagement / views
+            place_data[pid]["post_count"] += 1
 
-        mention_bonus = math.log(len(posts) + 1)
-        final_score = round(total_score * mention_bonus, 4)
-
-        db.update_virality_score(conn, place_id, final_score)
-        scored += 1
-
-        if verbose:
-            log.info(
+    # Batch update
+    updates = []
+    for pid, data in place_data.items():
+        if data["post_count"] == 0:
+            updates.append((0.0, pid))
+        else:
+            mention_bonus = math.log(data["post_count"] + 1)
+            final_score = round(data["total_score"] * mention_bonus, 4)
+            updates.append((final_score, pid))
+            log.debug(
                 "  %s: score=%.4f (posts=%d, mention_bonus=%.2f)",
-                place["name"], final_score, len(posts), mention_bonus,
+                data["name"], final_score, data["post_count"], mention_bonus,
             )
 
+    conn.executemany("UPDATE places SET virality_score = ? WHERE id = ?", updates)
     conn.commit()
+
+    scored = len(updates)
     log.info("Scored %d places", scored)
     return scored
 
@@ -263,7 +278,6 @@ def deduplicate_and_score(
     conn: sqlite3.Connection,
     city_id: int,
     city_name: str,
-    verbose: bool = False,
 ) -> dict[str, int]:
     """Run fuzzy dedup then virality scoring for a city.
 
@@ -271,8 +285,8 @@ def deduplicate_and_score(
     """
     log.info("=== Step 4: Dedup & Score — %s ===", city_name)
 
-    merged = _perform_dedup(conn, city_id, city_name, verbose=verbose)
-    scored = _score_places(conn, city_id, verbose=verbose)
+    merged = _perform_dedup(conn, city_id, city_name)
+    scored = _score_places(conn, city_id)
 
     log.info("Done — merged %d duplicates, scored %d places", merged, scored)
     return {"merged": merged, "scored": scored}

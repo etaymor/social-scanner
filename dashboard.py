@@ -1,448 +1,57 @@
 #!/usr/bin/env python3
 """Local web dashboard for browsing discovered places."""
 
-from flask import Flask, render_template_string, request
-import db
+import math
+import os
+
+from flask import Flask, jsonify, render_template, request
+from pipeline import db
 
 app = Flask(__name__)
-
-DASHBOARD_HTML = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Atlasi Place Discovery</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-            background: #0a0a0a;
-            color: #e5e5e5;
-            min-height: 100vh;
-        }
-
-        .header {
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-            border-bottom: 1px solid #222;
-            padding: 1.5rem 2rem;
-        }
-
-        .header h1 {
-            font-size: 1.5rem;
-            font-weight: 600;
-            color: #fff;
-            letter-spacing: -0.02em;
-        }
-
-        .header h1 span { color: #818cf8; }
-
-        .container { max-width: 1200px; margin: 0 auto; padding: 2rem; }
-
-        /* City selector */
-        .city-bar {
-            display: flex;
-            gap: 0.75rem;
-            align-items: center;
-            margin-bottom: 2rem;
-            flex-wrap: wrap;
-        }
-
-        .city-bar a {
-            display: inline-block;
-            padding: 0.5rem 1.25rem;
-            border-radius: 9999px;
-            text-decoration: none;
-            font-size: 0.875rem;
-            font-weight: 500;
-            transition: all 0.15s;
-        }
-
-        .city-bar a.active {
-            background: #818cf8;
-            color: #fff;
-        }
-
-        .city-bar a:not(.active) {
-            background: #1a1a1a;
-            color: #a1a1aa;
-            border: 1px solid #2a2a2a;
-        }
-
-        .city-bar a:not(.active):hover {
-            background: #222;
-            color: #e5e5e5;
-            border-color: #444;
-        }
-
-        /* Stats row */
-        .stats {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 1rem;
-            margin-bottom: 2rem;
-        }
-
-        .stat-card {
-            background: #141414;
-            border: 1px solid #222;
-            border-radius: 12px;
-            padding: 1.25rem;
-        }
-
-        .stat-card .label {
-            font-size: 0.75rem;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            color: #71717a;
-            margin-bottom: 0.25rem;
-        }
-
-        .stat-card .value {
-            font-size: 1.75rem;
-            font-weight: 700;
-            color: #fff;
-        }
-
-        /* Filters */
-        .filters {
-            display: flex;
-            gap: 0.75rem;
-            margin-bottom: 1.5rem;
-            flex-wrap: wrap;
-            align-items: center;
-        }
-
-        .filters select, .filters input {
-            background: #141414;
-            border: 1px solid #2a2a2a;
-            color: #e5e5e5;
-            padding: 0.5rem 0.75rem;
-            border-radius: 8px;
-            font-size: 0.875rem;
-            font-family: inherit;
-        }
-
-        .filters select:focus, .filters input:focus {
-            outline: none;
-            border-color: #818cf8;
-        }
-
-        .filters input { width: 220px; }
-
-        .filter-label {
-            font-size: 0.75rem;
-            color: #71717a;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }
-
-        /* Places table */
-        .places-table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 0.875rem;
-        }
-
-        .places-table th {
-            text-align: left;
-            padding: 0.75rem 1rem;
-            font-size: 0.75rem;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            color: #71717a;
-            border-bottom: 1px solid #222;
-            font-weight: 500;
-            cursor: pointer;
-            user-select: none;
-        }
-
-        .places-table th:hover { color: #a1a1aa; }
-
-        .places-table td {
-            padding: 0.75rem 1rem;
-            border-bottom: 1px solid #1a1a1a;
-            vertical-align: middle;
-        }
-
-        .places-table tr:hover { background: #141414; }
-
-        .rank {
-            color: #52525b;
-            font-variant-numeric: tabular-nums;
-            font-weight: 600;
-            width: 3rem;
-        }
-
-        .place-name {
-            font-weight: 600;
-            color: #fff;
-        }
-
-        .place-type {
-            display: inline-block;
-            padding: 0.2rem 0.6rem;
-            border-radius: 9999px;
-            font-size: 0.75rem;
-            font-weight: 500;
-        }
-
-        .type-restaurant { background: #7c2d1220; color: #f87171; border: 1px solid #7c2d1240; }
-        .type-cafe { background: #78350f20; color: #fbbf24; border: 1px solid #78350f40; }
-        .type-bar { background: #581c8720; color: #c084fc; border: 1px solid #581c8740; }
-        .type-club { background: #831843; color: #f9a8d4; border: 1px solid #9d174d40; }
-        .type-market { background: #14532d20; color: #4ade80; border: 1px solid #14532d40; }
-        .type-neighborhood { background: #1e3a5f20; color: #60a5fa; border: 1px solid #1e3a5f40; }
-        .type-viewpoint { background: #3b0764; color: #e879f9; border: 1px solid #6b21a840; }
-        .type-park { background: #052e1620; color: #34d399; border: 1px solid #052e1640; }
-        .type-museum { background: #451a0320; color: #fb923c; border: 1px solid #451a0340; }
-        .type-gallery { background: #4c0519; color: #fda4af; border: 1px solid #88123640; }
-        .type-shop { background: #0c4a6e20; color: #38bdf8; border: 1px solid #0c4a6e40; }
-        .type-activity { background: #365314; color: #a3e635; border: 1px solid #4d7c0f40; }
-        .type-street { background: #27272a; color: #a1a1aa; border: 1px solid #3f3f4640; }
-        .type-other { background: #1a1a1a; color: #71717a; border: 1px solid #2a2a2a; }
-
-        .score {
-            font-variant-numeric: tabular-nums;
-            font-weight: 600;
-            color: #818cf8;
-        }
-
-        .mentions {
-            font-variant-numeric: tabular-nums;
-            color: #a1a1aa;
-        }
-
-        .trap-badge {
-            display: inline-block;
-            padding: 0.15rem 0.5rem;
-            border-radius: 9999px;
-            font-size: 0.7rem;
-            font-weight: 600;
-            background: #7c2d1240;
-            color: #f87171;
-            border: 1px solid #7c2d1260;
-        }
-
-        .caption-preview {
-            max-width: 300px;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-            color: #52525b;
-            font-size: 0.8rem;
-        }
-
-        .empty-state {
-            text-align: center;
-            padding: 4rem 2rem;
-            color: #52525b;
-        }
-
-        .empty-state h2 {
-            font-size: 1.25rem;
-            margin-bottom: 0.5rem;
-            color: #71717a;
-        }
-
-        .empty-state code {
-            background: #1a1a1a;
-            padding: 0.25rem 0.5rem;
-            border-radius: 6px;
-            font-size: 0.875rem;
-            color: #818cf8;
-        }
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1><span>Atlasi</span> Place Discovery</h1>
-    </div>
-
-    <div class="container">
-        {% if cities %}
-        <div class="city-bar">
-            {% for c in cities %}
-            <a href="/?city_id={{ c.id }}" class="{{ 'active' if c.id == city_id else '' }}">
-                {{ c.name }}
-            </a>
-            {% endfor %}
-        </div>
-        {% endif %}
-
-        {% if city_id and stats %}
-        <div class="stats">
-            <div class="stat-card">
-                <div class="label">Posts Scraped</div>
-                <div class="value">{{ "{:,}".format(stats.posts) }}</div>
-            </div>
-            <div class="stat-card">
-                <div class="label">Hashtags</div>
-                <div class="value">{{ stats.hashtags }}</div>
-            </div>
-            <div class="stat-card">
-                <div class="label">Places Found</div>
-                <div class="value">{{ stats.places }}</div>
-            </div>
-            <div class="stat-card">
-                <div class="label">Tourist Traps</div>
-                <div class="value">{{ stats.tourist_traps }}</div>
-            </div>
-        </div>
-
-        <div class="filters">
-            <span class="filter-label">Filter:</span>
-            <select id="typeFilter" onchange="filterTable()">
-                <option value="">All types</option>
-                {% for t in place_types %}
-                <option value="{{ t }}" {{ 'selected' if t == type_filter else '' }}>{{ t }}</option>
-                {% endfor %}
-            </select>
-            <select id="trapFilter" onchange="filterTable()">
-                <option value="no" {{ 'selected' if trap_filter == 'no' else '' }}>Hide tourist traps</option>
-                <option value="" {{ 'selected' if trap_filter == '' else '' }}>Show all</option>
-                <option value="yes" {{ 'selected' if trap_filter == 'yes' else '' }}>Only tourist traps</option>
-            </select>
-            <input type="text" id="searchInput" placeholder="Search places..." oninput="filterTable()" value="{{ search or '' }}">
-        </div>
-
-        {% if places %}
-        <table class="places-table" id="placesTable">
-            <thead>
-                <tr>
-                    <th class="rank">#</th>
-                    <th>Name</th>
-                    <th>Type</th>
-                    <th onclick="sortTable(3)">Score</th>
-                    <th onclick="sortTable(4)">Mentions</th>
-                    <th>Status</th>
-                    <th>Sample Caption</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for p in places %}
-                <tr data-type="{{ p.type }}" data-trap="{{ 'yes' if p.is_tourist_trap else 'no' }}" data-name="{{ p.name|lower }}">
-                    <td class="rank">{{ loop.index }}</td>
-                    <td class="place-name">{{ p.name }}</td>
-                    <td><span class="place-type type-{{ p.type }}">{{ p.type }}</span></td>
-                    <td class="score">{{ "%.4f"|format(p.virality_score) }}</td>
-                    <td class="mentions">{{ p.mention_count }}</td>
-                    <td>{% if p.is_tourist_trap %}<span class="trap-badge">TRAP</span>{% endif %}</td>
-                    <td class="caption-preview" title="{{ p.sample_caption or '' }}">{{ p.sample_caption or '—' }}</td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-        {% else %}
-        <div class="empty-state">
-            <h2>No places yet</h2>
-            <p>Run the pipeline first: <code>python discover.py --city "{{ city_name }}"</code></p>
-        </div>
-        {% endif %}
-
-        {% elif not cities %}
-        <div class="empty-state">
-            <h2>No cities discovered yet</h2>
-            <p>Run the pipeline: <code>python discover.py --city "Istanbul"</code></p>
-        </div>
-        {% endif %}
-    </div>
-
-    <script>
-        function filterTable() {
-            const typeVal = document.getElementById('typeFilter').value.toLowerCase();
-            const trapVal = document.getElementById('trapFilter').value.toLowerCase();
-            const searchVal = document.getElementById('searchInput').value.toLowerCase();
-            const rows = document.querySelectorAll('#placesTable tbody tr');
-            let rank = 0;
-
-            rows.forEach(row => {
-                const type = row.dataset.type;
-                const trap = row.dataset.trap;
-                const name = row.dataset.name;
-
-                const typeMatch = !typeVal || type === typeVal;
-                const trapMatch = !trapVal || trap === trapVal;
-                const searchMatch = !searchVal || name.includes(searchVal);
-
-                if (typeMatch && trapMatch && searchMatch) {
-                    row.style.display = '';
-                    rank++;
-                    row.querySelector('.rank').textContent = rank;
-                } else {
-                    row.style.display = 'none';
-                }
-            });
-        }
-
-        let sortDir = {};
-        function sortTable(colIndex) {
-            const table = document.getElementById('placesTable');
-            const tbody = table.querySelector('tbody');
-            const rows = Array.from(tbody.querySelectorAll('tr'));
-
-            sortDir[colIndex] = !sortDir[colIndex];
-            const dir = sortDir[colIndex] ? -1 : 1;
-
-            rows.sort((a, b) => {
-                const aVal = parseFloat(a.children[colIndex].textContent) || 0;
-                const bVal = parseFloat(b.children[colIndex].textContent) || 0;
-                return (aVal - bVal) * dir;
-            });
-
-            rows.forEach(row => tbody.appendChild(row));
-
-            // Re-number visible rows
-            let rank = 0;
-            rows.forEach(row => {
-                if (row.style.display !== 'none') {
-                    rank++;
-                    row.querySelector('.rank').textContent = rank;
-                }
-            });
-        }
-
-        // Apply filters on page load
-        filterTable();
-    </script>
-</body>
-</html>
-"""
 
 
 @app.route("/")
 def index():
     conn = db.get_connection()
-    db.init_db(conn)
+    try:
+        db.init_db(conn)
 
-    cities = conn.execute("SELECT * FROM cities ORDER BY name").fetchall()
-    city_id = request.args.get("city_id", type=int)
-    city_name = None
-    stats = None
-    places = []
-    place_types = set()
+        cities = conn.execute("SELECT * FROM cities ORDER BY name").fetchall()
+        city_id = request.args.get("city_id", type=int)
+        city_name = None
+        stats = None
+        places = []
+        place_types = set()
 
-    if not city_id and cities:
-        city_id = cities[0]["id"]
+        if not city_id and cities:
+            city_id = cities[0]["id"]
 
-    if city_id:
-        city_row = conn.execute("SELECT * FROM cities WHERE id = ?", (city_id,)).fetchone()
-        if city_row:
-            city_name = city_row["name"]
-            stats_dict = db.get_city_stats(conn, city_id)
-            stats = type("Stats", (), stats_dict)()
-            places = db.get_all_places(conn, city_id)
-            place_types = sorted({p["type"] for p in places})
+        page = request.args.get("page", 1, type=int)
+        per_page = 50
+        total_places = 0
+        total_pages = 0
 
-    type_filter = request.args.get("type", "")
-    trap_filter = request.args.get("trap", "no")
-    search = request.args.get("search", "")
+        if city_id:
+            city_row = conn.execute("SELECT * FROM cities WHERE id = ?", (city_id,)).fetchone()
+            if city_row:
+                city_name = city_row["name"]
+                stats = db.get_city_stats(conn, city_id)
+                places, total_places = db.get_places_page(conn, city_id, page, per_page)
+                total_pages = math.ceil(total_places / per_page) if total_places else 0
+                place_types = sorted(
+                    r["type"] for r in conn.execute(
+                        "SELECT DISTINCT type FROM places WHERE city_id = ?", (city_id,),
+                    ).fetchall()
+                )
 
-    conn.close()
+        type_filter = request.args.get("type", "")
+        trap_filter = request.args.get("trap", "no")
+        search = request.args.get("search", "")
+    finally:
+        conn.close()
 
-    return render_template_string(
-        DASHBOARD_HTML,
+    return render_template(
+        "dashboard.html",
         cities=cities,
         city_id=city_id,
         city_name=city_name,
@@ -452,27 +61,30 @@ def index():
         type_filter=type_filter,
         trap_filter=trap_filter,
         search=search,
+        page=page,
+        total_pages=total_pages,
+        per_page=per_page,
     )
 
 
 @app.route("/api/places")
 def api_places():
     """JSON endpoint for places data."""
-    from flask import jsonify
     conn = db.get_connection()
-    db.init_db(conn)
+    try:
+        db.init_db(conn)
 
-    city_id = request.args.get("city_id", type=int)
-    if not city_id:
+        city_id = request.args.get("city_id", type=int)
+        if not city_id:
+            return jsonify([])
+
+        places = db.get_all_places(conn, city_id)
+        result = [dict(p) for p in places]
+    finally:
         conn.close()
-        return jsonify([])
-
-    places = db.get_all_places(conn, city_id)
-    result = [dict(p) for p in places]
-    conn.close()
     return jsonify(result)
 
 
 if __name__ == "__main__":
     print("Starting Atlasi Dashboard at http://localhost:5555")
-    app.run(host="127.0.0.1", port=5555, debug=True)
+    app.run(host="127.0.0.1", port=5555, debug=os.getenv("FLASK_DEBUG", "false").lower() == "true")

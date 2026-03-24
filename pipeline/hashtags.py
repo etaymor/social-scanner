@@ -8,8 +8,8 @@ insensitive) and persisted to SQLite.
 import logging
 import sqlite3
 
-from db import insert_hashtags
-from llm import call_llm_json
+from .db import insert_hashtags
+from .llm import call_llm_json
 
 log = logging.getLogger(__name__)
 

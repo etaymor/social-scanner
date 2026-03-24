@@ -25,7 +25,7 @@ class CreditsExhaustedError(LLMError):
     pass
 
 
-def call_llm(prompt: str, *, model: str = None, temperature: float = 0.7) -> str:
+def call_llm(prompt: str, *, system: str = None, model: str = None, temperature: float = 0.7) -> str:
     """Send a prompt to OpenRouter and return the text response.
 
     Retries on transient errors with exponential backoff.
@@ -38,9 +38,13 @@ def call_llm(prompt: str, *, model: str = None, temperature: float = 0.7) -> str
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
     }
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
     payload = {
         "model": model or OPENROUTER_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": messages,
         "temperature": temperature,
         "response_format": {"type": "json_object"},
     }
@@ -81,7 +85,14 @@ def call_llm(prompt: str, *, model: str = None, temperature: float = 0.7) -> str
     raise LLMError(f"LLM call failed after {OPENROUTER_MAX_RETRIES} retries: {last_error}")
 
 
-def call_llm_json(prompt: str, **kwargs) -> list | dict:
+def sanitize_text(text: str, max_length: int = 2000) -> str:
+    """Strip control characters and limit length for safe LLM prompt insertion."""
+    import re
+    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+    return cleaned[:max_length]
+
+
+def call_llm_json(prompt: str, **kwargs) -> list[object] | dict[str, object]:
     """Call the LLM and parse the response as JSON.
 
     Handles cases where the LLM wraps JSON in markdown code fences.

@@ -5,10 +5,29 @@ import math
 import sqlite3
 
 import config
-import db
-from llm import call_llm_json, LLMError
+from . import db
+from .llm import call_llm_json, LLMError
 
 log = logging.getLogger(__name__)
+
+_TRUTHY = frozenset({"true", "1", "yes"})
+_FALSY = frozenset({"false", "0", "no"})
+
+
+def _normalize_bool(value: object) -> bool:
+    """Coerce booleans, ints, and common string representations to bool."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        lower = value.strip().lower()
+        if lower in _TRUTHY:
+            return True
+        if lower in _FALSY:
+            return False
+    return False
+
 
 PROMPT_TEMPLATE = """\
 You are a travel expert who knows the difference between tourist traps and
@@ -88,20 +107,24 @@ def filter_tourist_traps(
         # Build a lookup from index to is_tourist_trap
         trap_lookup: dict[int, bool] = {}
         for item in results:
+            if not isinstance(item, dict):
+                continue
             idx = item.get("index")
-            is_trap = item.get("is_tourist_trap", False)
-            if idx is not None:
-                trap_lookup[idx] = bool(is_trap)
+            if not isinstance(idx, int):
+                continue
+            trap_lookup[idx] = _normalize_bool(item.get("is_tourist_trap", False))
 
         for i, place in enumerate(batch):
             if i not in trap_lookup:
                 continue
             is_trap = trap_lookup[i]
+            if bool(place["is_tourist_trap"]) == is_trap:
+                continue
             db.update_tourist_trap(conn, place["id"], is_trap)
             if is_trap:
                 reason = ""
                 for item in results:
-                    if item.get("index") == i:
+                    if isinstance(item, dict) and item.get("index") == i:
                         reason = item.get("reason", "")
                         break
                 log.debug("  Tourist trap: %s — %s", place["name"], reason)

@@ -1,29 +1,11 @@
 """Integration test for the full pipeline with mocked API responses."""
 
-import json
 import sqlite3
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-import db
-
-
-@pytest.fixture
-def conn():
-    connection = db.get_connection(":memory:")
-    db.init_db(connection)
-    yield connection
-    connection.close()
-
-
-@pytest.fixture
-def city_id(conn):
-    return db.get_or_create_city(conn, "TestCity")
+from pipeline import db
 
 
 # ---------------------------------------------------------------------------
@@ -179,13 +161,13 @@ class TestDatabase:
 # ---------------------------------------------------------------------------
 
 class TestHashtagGeneration:
-    @patch("hashtags.call_llm_json")
+    @patch("pipeline.hashtags.call_llm_json")
     def test_generate_hashtags(self, mock_llm, conn, city_id):
         mock_llm.return_value = {
             "hashtags": ["istanbulhidden", "istanbulfood", "istanbulnightlife"]
         }
 
-        from hashtags import generate_hashtags
+        from pipeline.hashtags import generate_hashtags
         tags = generate_hashtags(conn, city_id, "Istanbul")
 
         # Should have LLM tags + hardcoded (deduped)
@@ -206,7 +188,7 @@ class TestHashtagGeneration:
 # ---------------------------------------------------------------------------
 
 class TestExtraction:
-    @patch("extractor.call_llm_json")
+    @patch("pipeline.extractor.call_llm_json")
     def test_extract_places_from_posts(self, mock_llm, conn, city_id):
         # Insert some raw posts
         for i in range(3):
@@ -235,7 +217,7 @@ class TestExtraction:
             ]
         }
 
-        from extractor import extract_places
+        from pipeline.extractor import extract_places
         count = extract_places(conn, city_id, "Istanbul")
 
         assert count == 2  # Two posts mentioned Mikla
@@ -253,13 +235,36 @@ class TestExtraction:
         unprocessed = db.get_unprocessed_posts(conn, city_id, 100)
         assert len(unprocessed) == 0
 
+    @patch("pipeline.extractor.call_llm_json")
+    def test_llm_failure_leaves_posts_unprocessed(self, mock_llm, conn, city_id):
+        """Posts should NOT be marked processed when LLM extraction fails."""
+        from pipeline.llm import LLMError
+
+        conn.execute(
+            """INSERT INTO raw_posts
+               (city_id, platform, post_id, caption, likes, views, processed)
+               VALUES (?, 'tiktok', 'fail_post', 'Some caption', 100, 5000, FALSE)""",
+            (city_id,),
+        )
+        conn.commit()
+
+        mock_llm.side_effect = LLMError("Simulated failure")
+
+        from pipeline.extractor import extract_places
+        count = extract_places(conn, city_id, "Istanbul")
+
+        assert count == 0
+        # Posts should remain unprocessed for retry
+        unprocessed = db.get_unprocessed_posts(conn, city_id, 100)
+        assert len(unprocessed) == 1
+
 
 # ---------------------------------------------------------------------------
 # Filter integration test
 # ---------------------------------------------------------------------------
 
 class TestFilter:
-    @patch("filter.call_llm_json")
+    @patch("pipeline.filter.call_llm_json")
     def test_filter_tourist_traps(self, mock_llm, conn, city_id):
         # Insert places
         conn.execute(
@@ -279,7 +284,7 @@ class TestFilter:
             ]
         }
 
-        from filter import filter_tourist_traps
+        from pipeline.filter import filter_tourist_traps
         filter_tourist_traps(conn, city_id, "Istanbul")
 
         places = conn.execute(
@@ -290,3 +295,123 @@ class TestFilter:
         trap_map = {p["name"]: bool(p["is_tourist_trap"]) for p in places}
         assert trap_map["Grand Bazaar"] is True
         assert trap_map["Secret Rooftop Bar"] is False
+
+    @patch("pipeline.filter.call_llm_json")
+    def test_filter_skips_non_dict_results(self, mock_llm, conn, city_id):
+        """Non-dict items in results should be silently skipped."""
+        conn.execute(
+            "INSERT INTO places (city_id, name, type) VALUES (?, 'Cafe A', 'cafe')",
+            (city_id,),
+        )
+        conn.commit()
+
+        mock_llm.return_value = {
+            "results": [
+                "not a dict",
+                42,
+                None,
+                {"index": 0, "is_tourist_trap": True, "reason": "Overrated"},
+            ]
+        }
+
+        from pipeline.filter import filter_tourist_traps
+        filter_tourist_traps(conn, city_id, "Istanbul")
+
+        row = conn.execute(
+            "SELECT is_tourist_trap FROM places WHERE city_id = ? AND name = 'Cafe A'",
+            (city_id,),
+        ).fetchone()
+        assert bool(row["is_tourist_trap"]) is True
+
+    @patch("pipeline.filter.call_llm_json")
+    def test_filter_string_boolean_values(self, mock_llm, conn, city_id):
+        """String representations of booleans should be normalized correctly."""
+        conn.execute(
+            "INSERT INTO places (city_id, name, type) VALUES (?, 'Place True', 'cafe')",
+            (city_id,),
+        )
+        conn.execute(
+            "INSERT INTO places (city_id, name, type) VALUES (?, 'Place False', 'bar')",
+            (city_id,),
+        )
+        conn.commit()
+
+        mock_llm.return_value = {
+            "results": [
+                {"index": 0, "is_tourist_trap": "true", "reason": "String true"},
+                {"index": 1, "is_tourist_trap": "false", "reason": "String false"},
+            ]
+        }
+
+        from pipeline.filter import filter_tourist_traps
+        filter_tourist_traps(conn, city_id, "Istanbul")
+
+        places = conn.execute(
+            "SELECT name, is_tourist_trap FROM places WHERE city_id = ? ORDER BY name",
+            (city_id,),
+        ).fetchall()
+        trap_map = {p["name"]: bool(p["is_tourist_trap"]) for p in places}
+        assert trap_map["Place True"] is True
+        assert trap_map["Place False"] is False
+
+    @patch("pipeline.filter.call_llm_json")
+    def test_filter_numeric_boolean_values(self, mock_llm, conn, city_id):
+        """Numeric 1/0 should be treated as True/False."""
+        conn.execute(
+            "INSERT INTO places (city_id, name, type) VALUES (?, 'Num One', 'cafe')",
+            (city_id,),
+        )
+        conn.execute(
+            "INSERT INTO places (city_id, name, type) VALUES (?, 'Num Zero', 'bar')",
+            (city_id,),
+        )
+        conn.commit()
+
+        mock_llm.return_value = {
+            "results": [
+                {"index": 0, "is_tourist_trap": 1, "reason": "Numeric 1"},
+                {"index": 1, "is_tourist_trap": 0, "reason": "Numeric 0"},
+            ]
+        }
+
+        from pipeline.filter import filter_tourist_traps
+        filter_tourist_traps(conn, city_id, "Istanbul")
+
+        places = conn.execute(
+            "SELECT name, is_tourist_trap FROM places WHERE city_id = ? ORDER BY name",
+            (city_id,),
+        ).fetchall()
+        trap_map = {p["name"]: bool(p["is_tourist_trap"]) for p in places}
+        assert trap_map["Num One"] is True
+        assert trap_map["Num Zero"] is False
+
+
+class TestNormalizeBool:
+    """Unit tests for filter._normalize_bool."""
+
+    def test_real_booleans(self):
+        from pipeline.filter import _normalize_bool
+        assert _normalize_bool(True) is True
+        assert _normalize_bool(False) is False
+
+    @pytest.mark.parametrize("val,expected", [
+        (1, True), (0, False), (1.0, True), (0.0, False), (-1, True),
+    ])
+    def test_numeric(self, val, expected):
+        from pipeline.filter import _normalize_bool
+        assert _normalize_bool(val) is expected
+
+    @pytest.mark.parametrize("val,expected", [
+        ("true", True), ("True", True), ("TRUE", True),
+        ("false", False), ("False", False), ("FALSE", False),
+        ("1", True), ("0", False),
+        ("yes", True), ("no", False),
+    ])
+    def test_string_representations(self, val, expected):
+        from pipeline.filter import _normalize_bool
+        assert _normalize_bool(val) is expected
+
+    @pytest.mark.parametrize("val", [None, "", "maybe", [], {}])
+    def test_unrecognized_defaults_to_false(self, val):
+        from pipeline.filter import _normalize_bool
+        assert _normalize_bool(val) is False

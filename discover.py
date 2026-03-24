@@ -4,13 +4,16 @@
 import argparse
 import csv
 import logging
+from pathlib import Path
+import sqlite3
 import sys
 
-import db
+from pipeline import db
 from config import DEFAULT_MAX_POSTS
+from pipeline.llm import CreditsExhaustedError
 
 
-def setup_logging(verbose: bool, quiet: bool):
+def setup_logging(verbose: bool, quiet: bool) -> None:
     level = logging.DEBUG if verbose else (logging.WARNING if quiet else logging.INFO)
     logging.basicConfig(
         level=level,
@@ -27,7 +30,7 @@ def validate_city(city_name: str) -> str:
     return city
 
 
-def print_summary(conn, city_id: int, city_name: str):
+def print_summary(conn: sqlite3.Connection, city_id: int, city_name: str) -> None:
     stats = db.get_city_stats(conn, city_id)
     places = db.get_all_places(conn, city_id)
     non_traps = [p for p in places if not p["is_tourist_trap"]]
@@ -51,13 +54,13 @@ def print_summary(conn, city_id: int, city_name: str):
     print()
 
 
-def export_csv(conn, city_id: int, city_name: str, filepath: str = None):
+def export_csv(conn: sqlite3.Connection, city_id: int, city_name: str, filepath: str | None = None) -> str:
     places = db.get_all_places(conn, city_id)
     non_traps = [p for p in places if not p["is_tourist_trap"]]
 
     if not filepath:
         safe_name = city_name.lower().replace(" ", "_")
-        filepath = f"{safe_name}_places.csv"
+        filepath = Path(f"{safe_name}_places.csv").name
 
     with open(filepath, "w", newline="") as f:
         writer = csv.writer(f)
@@ -69,7 +72,7 @@ def export_csv(conn, city_id: int, city_name: str, filepath: str = None):
     return filepath
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Atlasi Place Discovery Pipeline — discover trending places from social media",
     )
@@ -87,7 +90,7 @@ def main():
     args = parser.parse_args()
 
     setup_logging(args.verbose, args.quiet)
-    log = logging.getLogger("discover")
+    log = logging.getLogger(__name__)
 
     try:
         city_name = validate_city(args.city)
@@ -96,51 +99,69 @@ def main():
         sys.exit(1)
 
     conn = db.get_connection()
-    db.init_db(conn)
+    try:
+        db.init_db(conn)
 
-    city_id = db.get_or_create_city(conn, city_name)
-
-    if args.reset:
-        log.info("Resetting all data for %s...", city_name)
-        db.reset_city(conn, city_id)
         city_id = db.get_or_create_city(conn, city_name)
 
-    # Step 1: Hashtag Generation
-    from hashtags import generate_hashtags
-    log.info("Step 1/5: Generating hashtags for %s...", city_name)
-    tags = generate_hashtags(conn, city_id, city_name, verbose=args.verbose)
-    log.info("Generated %d unique hashtags", len(tags))
+        if args.reset:
+            log.info("Resetting all data for %s...", city_name)
+            db.reset_city(conn, city_id)
+            city_id = db.get_or_create_city(conn, city_name)
 
-    # Step 2: Apify Scraping
-    if not args.skip_scrape:
-        from scraper import scrape_posts
-        log.info("Step 2/5: Scraping social media posts...")
-        scrape_posts(conn, city_id, city_name, max_posts=args.max_posts, verbose=args.verbose)
-    else:
-        log.info("Step 2/5: Skipping scraping (--skip-scrape)")
+        # Recovery: reset any hashtags stuck in "running" from a previous crash
+        conn.execute(
+            "UPDATE hashtags SET scrape_status = 'pending' WHERE city_id = ? AND scrape_status = 'running'",
+            (city_id,),
+        )
+        conn.commit()
 
-    # Step 3: LLM Place Extraction
-    from extractor import extract_places
-    log.info("Step 3/5: Extracting places from captions...")
-    extract_places(conn, city_id, city_name, verbose=args.verbose)
+        # Step 1: Hashtag Generation
+        from pipeline.hashtags import generate_hashtags
+        log.info("Step 1/5: Generating hashtags for %s...", city_name)
+        tags = generate_hashtags(conn, city_id, city_name)
+        log.info("Generated %d unique hashtags", len(tags))
 
-    # Step 4: Deduplication + Scoring
-    from scorer import deduplicate_and_score
-    log.info("Step 4/5: Deduplicating and scoring places...")
-    deduplicate_and_score(conn, city_id, city_name, verbose=args.verbose)
+        # Step 2: Apify Scraping
+        if not args.skip_scrape:
+            from pipeline.scraper import scrape_posts
+            log.info("Step 2/5: Scraping social media posts...")
+            scrape_posts(conn, city_id, city_name, max_posts=args.max_posts)
+        else:
+            log.info("Step 2/5: Skipping scraping (--skip-scrape)")
 
-    # Step 5: Tourist Trap Filter
-    from filter import filter_tourist_traps
-    log.info("Step 5/5: Filtering tourist traps...")
-    filter_tourist_traps(conn, city_id, city_name, verbose=args.verbose)
+        # Step 3: LLM Place Extraction
+        from pipeline.extractor import extract_places
+        log.info("Step 3/5: Extracting places from captions...")
+        extract_places(conn, city_id, city_name)
 
-    # Output
-    print_summary(conn, city_id, city_name)
+        # Step 4: Deduplication + Scoring
+        from pipeline.scorer import deduplicate_and_score
+        log.info("Step 4/5: Deduplicating and scoring places...")
+        deduplicate_and_score(conn, city_id, city_name)
 
-    if args.export_csv:
-        export_csv(conn, city_id, city_name)
+        # Step 5: Tourist Trap Filter
+        from pipeline.filter import filter_tourist_traps
+        log.info("Step 5/5: Filtering tourist traps...")
+        filter_tourist_traps(conn, city_id, city_name)
 
-    conn.close()
+        # Output
+        print_summary(conn, city_id, city_name)
+
+        if args.export_csv:
+            export_csv(conn, city_id, city_name)
+
+    except CreditsExhaustedError:
+        print(
+            "\n  OpenRouter credits exhausted.\n"
+            "  Add credits at https://openrouter.ai and re-run.\n"
+            "  Progress has been saved — the pipeline will resume where it left off.\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    finally:
+        conn.close()
+
     log.info("Pipeline complete for %s", city_name)
 
 

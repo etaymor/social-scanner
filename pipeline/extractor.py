@@ -4,17 +4,13 @@ import logging
 import sqlite3
 
 import config
-import db
-from llm import call_llm_json, LLMError
+from . import db
+from .llm import call_llm_json, LLMError, sanitize_text
 
 log = logging.getLogger(__name__)
 
-PROMPT_TEMPLATE = """\
+SYSTEM_PROMPT = """\
 You are extracting specific place names from social media captions about {city_name}.
-
-For each caption, extract any SPECIFIC, NAMED places mentioned — restaurants, cafes,
-bars, clubs, markets, neighborhoods, viewpoints, parks, museums, galleries, shops,
-or activities.
 
 Rules:
 - Only extract places with actual names (not "this cute cafe" without a name)
@@ -22,13 +18,15 @@ Rules:
 - Classify each place by type
 - Skip generic city landmarks unless the caption frames them in a non-obvious way
 
-Captions:
-{numbered_captions}
-
 Return ONLY a JSON object with a "results" key containing an array of objects. Each object:
 {{"caption_index": <int>, "places": [{{"name": "<place name>", "type": "<restaurant|cafe|bar|club|market|neighborhood|viewpoint|park|museum|gallery|shop|activity|street|other>"}}]}}
 
 If a caption mentions no specific named place, return an empty places array for it."""
+
+USER_PROMPT_TEMPLATE = """\
+Extract place names from these captions:
+
+{numbered_captions}"""
 
 
 def _build_numbered_captions(posts: list[sqlite3.Row]) -> tuple[str, dict[int, sqlite3.Row]]:
@@ -44,7 +42,7 @@ def _build_numbered_captions(posts: list[sqlite3.Row]) -> tuple[str, dict[int, s
         if not caption or not caption.strip():
             continue
         idx += 1
-        lines.append(f"{idx}. {caption.strip()}")
+        lines.append(f"{idx}. {sanitize_text(caption.strip(), max_length=500)}")
         index_to_post[idx] = post
     return "\n".join(lines), index_to_post
 
@@ -60,7 +58,6 @@ def _process_batch(
     city_id: int,
     city_name: str,
     posts: list[sqlite3.Row],
-    verbose: bool = False,
 ) -> int:
     """Send one batch to the LLM and upsert extracted places.
 
@@ -72,12 +69,10 @@ def _process_batch(
         # Every caption in the batch was empty — nothing to send.
         return 0
 
-    prompt = PROMPT_TEMPLATE.format(
-        city_name=city_name,
-        numbered_captions=numbered_captions,
-    )
+    system = SYSTEM_PROMPT.format(city_name=city_name)
+    user_prompt = USER_PROMPT_TEMPLATE.format(numbered_captions=numbered_captions)
 
-    response = call_llm_json(prompt, temperature=0.2)
+    response = call_llm_json(user_prompt, system=system, temperature=0.2)
 
     results = response.get("results", []) if isinstance(response, dict) else []
     places_extracted = 0
@@ -103,8 +98,7 @@ def _process_batch(
                 (post["caption"] or "")[:500],
             )
             places_extracted += 1
-            if verbose:
-                log.debug("  -> %s (%s)", name, place_type)
+            log.debug("  -> %s (%s)", name, place_type)
 
     return places_extracted
 
@@ -113,7 +107,6 @@ def extract_places(
     conn: sqlite3.Connection,
     city_id: int,
     city_name: str,
-    verbose: bool = False,
 ) -> int:
     """Extract place names from all unprocessed posts for a city.
 
@@ -135,13 +128,13 @@ def extract_places(
         post_ids = [post["id"] for post in posts]
 
         try:
-            extracted = _process_batch(conn, city_id, city_name, posts, verbose)
+            extracted = _process_batch(conn, city_id, city_name, posts)
             total_places += extracted
+            db.mark_posts_processed(conn, post_ids)
+            conn.commit()
         except LLMError:
-            log.exception("LLM error on batch %d — skipping batch", batch_num)
-
-        db.mark_posts_processed(conn, post_ids)
-        conn.commit()
+            log.exception("LLM error on batch %d — aborting extraction", batch_num)
+            break
 
     log.info(
         "Extraction complete: %d batch(es), %d place(s) extracted.",

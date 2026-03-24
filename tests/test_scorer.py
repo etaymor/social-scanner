@@ -5,27 +5,8 @@ import sqlite3
 
 import pytest
 
-# Ensure project root is importable
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-import db
-from scorer import _normalize_name, _find_candidate_pairs, _score_places
-
-
-@pytest.fixture
-def conn():
-    """In-memory SQLite database with schema initialized."""
-    connection = db.get_connection(":memory:")
-    db.init_db(connection)
-    yield connection
-    connection.close()
-
-
-@pytest.fixture
-def city_id(conn):
-    return db.get_or_create_city(conn, "TestCity")
+from pipeline import db
+from pipeline.scorer import _normalize_name, _find_candidate_pairs, _build_merge_groups, _score_places
 
 
 # ---------------------------------------------------------------------------
@@ -208,3 +189,36 @@ class TestFuzzyDedupCandidates:
                   self._make_fake_place(2, "Blue Mosque")]
         pairs = _find_candidate_pairs(places)
         assert len(pairs) == 0
+
+
+# ---------------------------------------------------------------------------
+# Union-find (merge groups) tests
+# ---------------------------------------------------------------------------
+
+class TestBuildMergeGroups:
+    def test_single_pair(self):
+        groups = _build_merge_groups([(1, 2)], {1, 2, 3})
+        assert len(groups) == 1
+        assert groups[0] == {1, 2}
+
+    def test_transitive_merge(self):
+        groups = _build_merge_groups([(1, 2), (2, 3)], {1, 2, 3})
+        assert len(groups) == 1
+        assert groups[0] == {1, 2, 3}
+
+    def test_separate_groups(self):
+        groups = _build_merge_groups([(1, 2), (3, 4)], {1, 2, 3, 4})
+        assert len(groups) == 2
+        ids = [sorted(g) for g in groups]
+        assert [1, 2] in ids
+        assert [3, 4] in ids
+
+    def test_no_pairs(self):
+        groups = _build_merge_groups([], {1, 2})
+        assert len(groups) == 0
+
+    def test_complex_chain(self):
+        groups = _build_merge_groups([(1, 2), (3, 4), (2, 3)], {1, 2, 3, 4, 5})
+        # 1-2-3-4 should be one group, 5 is alone (no group)
+        assert len(groups) == 1
+        assert groups[0] == {1, 2, 3, 4}

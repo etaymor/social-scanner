@@ -1,10 +1,12 @@
 """SQLite database setup, schema, and query helpers."""
 
 import sqlite3
+from pathlib import Path
+
 from config import DB_PATH
 
 
-def get_connection(db_path=None) -> sqlite3.Connection:
+def get_connection(db_path: str | Path | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path or DB_PATH)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -14,7 +16,7 @@ def get_connection(db_path=None) -> sqlite3.Connection:
     return conn
 
 
-def init_db(conn: sqlite3.Connection):
+def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS cities (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,6 +79,16 @@ def init_db(conn: sqlite3.Connection):
             PRIMARY KEY (place_id, post_id)
         );
     """)
+    conn.executescript("""
+        CREATE INDEX IF NOT EXISTS idx_hashtags_city_status ON hashtags(city_id, scrape_status);
+        CREATE INDEX IF NOT EXISTS idx_raw_posts_city_processed ON raw_posts(city_id, processed);
+        CREATE INDEX IF NOT EXISTS idx_raw_posts_city ON raw_posts(city_id);
+        CREATE INDEX IF NOT EXISTS idx_places_city_score ON places(city_id, virality_score DESC);
+        CREATE INDEX IF NOT EXISTS idx_places_city_trap ON places(city_id, is_tourist_trap);
+        CREATE INDEX IF NOT EXISTS idx_places_city_name ON places(city_id, name COLLATE NOCASE);
+        CREATE INDEX IF NOT EXISTS idx_place_posts_place ON place_posts(place_id);
+        CREATE INDEX IF NOT EXISTS idx_place_posts_post ON place_posts(post_id);
+    """)
     conn.commit()
 
 
@@ -91,14 +103,14 @@ def get_or_create_city(conn: sqlite3.Connection, city_name: str) -> int:
     return cur.lastrowid
 
 
-def reset_city(conn: sqlite3.Connection, city_id: int):
+def reset_city(conn: sqlite3.Connection, city_id: int) -> None:
     conn.execute("DELETE FROM cities WHERE id = ?", (city_id,))
     conn.commit()
 
 
 # --- Hashtag helpers ---
 
-def insert_hashtags(conn: sqlite3.Connection, city_id: int, tags: list[str]):
+def insert_hashtags(conn: sqlite3.Connection, city_id: int, tags: list[str]) -> None:
     for tag in tags:
         for platform in ("tiktok", "instagram"):
             conn.execute(
@@ -115,7 +127,7 @@ def get_pending_hashtags(conn: sqlite3.Connection, city_id: int) -> list[sqlite3
     ).fetchall()
 
 
-def update_hashtag_status(conn: sqlite3.Connection, hashtag_id: int, status: str):
+def update_hashtag_status(conn: sqlite3.Connection, hashtag_id: int, status: str) -> None:
     conn.execute(
         "UPDATE hashtags SET scrape_status = ? WHERE id = ?",
         (status, hashtag_id),
@@ -126,7 +138,7 @@ def update_hashtag_status(conn: sqlite3.Connection, hashtag_id: int, status: str
 # --- Post helpers ---
 
 def insert_post(conn: sqlite3.Connection, city_id: int, platform: str,
-                post_data: dict, hashtag_id: int) -> int | None:
+                post_data: dict[str, object], hashtag_id: int) -> int | None:
     """Insert a post. Returns the raw_posts.id or None if duplicate."""
     try:
         cur = conn.execute(
@@ -159,7 +171,7 @@ def insert_post(conn: sqlite3.Connection, city_id: int, platform: str,
                 (raw_id, hashtag_id),
             )
         return raw_id
-    except sqlite3.Error:
+    except sqlite3.IntegrityError:
         return None
 
 
@@ -171,7 +183,7 @@ def get_unprocessed_posts(conn: sqlite3.Connection, city_id: int,
     ).fetchall()
 
 
-def mark_posts_processed(conn: sqlite3.Connection, post_ids: list[int]):
+def mark_posts_processed(conn: sqlite3.Connection, post_ids: list[int]) -> None:
     if not post_ids:
         return
     placeholders = ",".join("?" * len(post_ids))
@@ -187,6 +199,10 @@ def mark_posts_processed(conn: sqlite3.Connection, post_ids: list[int]):
 def upsert_place(conn: sqlite3.Connection, city_id: int, name: str,
                  place_type: str, post_id: int, sample_caption: str = None) -> int:
     """Insert or update a place, link it to the post. Returns place id."""
+    import re
+    name = re.sub(r"<[^>]+>", "", name)[:200].strip()
+    if not name:
+        return -1
     row = conn.execute(
         "SELECT id, mention_count FROM places WHERE city_id = ? AND name = ? COLLATE NOCASE",
         (city_id, name),
@@ -219,6 +235,20 @@ def get_all_places(conn: sqlite3.Connection, city_id: int) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def get_places_page(conn: sqlite3.Connection, city_id: int,
+                    page: int = 1, per_page: int = 50) -> tuple[list[sqlite3.Row], int]:
+    """Return a page of places and total count for pagination."""
+    total = conn.execute(
+        "SELECT COUNT(*) as cnt FROM places WHERE city_id = ?", (city_id,),
+    ).fetchone()["cnt"]
+    offset = (page - 1) * per_page
+    rows = conn.execute(
+        "SELECT * FROM places WHERE city_id = ? ORDER BY virality_score DESC LIMIT ? OFFSET ?",
+        (city_id, per_page, offset),
+    ).fetchall()
+    return rows, total
+
+
 def get_place_post_ids(conn: sqlite3.Connection, place_id: int) -> list[int]:
     rows = conn.execute(
         "SELECT post_id FROM place_posts WHERE place_id = ?", (place_id,),
@@ -235,45 +265,46 @@ def get_posts_by_ids(conn: sqlite3.Connection, post_ids: list[int]) -> list[sqli
     ).fetchall()
 
 
-def update_virality_score(conn: sqlite3.Connection, place_id: int, score: float):
+def update_virality_score(conn: sqlite3.Connection, place_id: int, score: float) -> None:
     conn.execute(
         "UPDATE places SET virality_score = ? WHERE id = ?", (score, place_id),
     )
 
 
-def update_tourist_trap(conn: sqlite3.Connection, place_id: int, is_trap: bool):
+def update_tourist_trap(conn: sqlite3.Connection, place_id: int, is_trap: bool) -> None:
     conn.execute(
         "UPDATE places SET is_tourist_trap = ? WHERE id = ?", (is_trap, place_id),
     )
 
 
-def merge_places(conn: sqlite3.Connection, keep_id: int, merge_ids: list[int]):
+def merge_places(conn: sqlite3.Connection, keep_id: int, merge_ids: list[int]) -> None:
     """Merge duplicate places into keep_id. Atomic transaction."""
     if not merge_ids:
         return
     placeholders = ",".join("?" * len(merge_ids))
 
-    # Move all post links to the kept place
-    conn.execute(
-        f"""INSERT OR IGNORE INTO place_posts (place_id, post_id)
-            SELECT ?, post_id FROM place_posts WHERE place_id IN ({placeholders})""",
-        [keep_id] + merge_ids,
-    )
+    with conn:
+        # Move all post links to the kept place
+        conn.execute(
+            f"""INSERT OR IGNORE INTO place_posts (place_id, post_id)
+                SELECT ?, post_id FROM place_posts WHERE place_id IN ({placeholders})""",
+            [keep_id] + merge_ids,
+        )
 
-    # Sum up mention counts
-    row = conn.execute(
-        f"SELECT COALESCE(SUM(mention_count), 0) as total FROM places WHERE id IN ({placeholders})",
-        merge_ids,
-    ).fetchone()
-    conn.execute(
-        "UPDATE places SET mention_count = mention_count + ? WHERE id = ?",
-        (row["total"], keep_id),
-    )
+        # Sum up mention counts
+        row = conn.execute(
+            f"SELECT COALESCE(SUM(mention_count), 0) as total FROM places WHERE id IN ({placeholders})",
+            merge_ids,
+        ).fetchone()
+        conn.execute(
+            "UPDATE places SET mention_count = mention_count + ? WHERE id = ?",
+            (row["total"], keep_id),
+        )
 
-    # Delete merged places (cascade deletes their place_posts)
-    conn.execute(
-        f"DELETE FROM places WHERE id IN ({placeholders})", merge_ids,
-    )
+        # Delete merged places (cascade deletes their place_posts)
+        conn.execute(
+            f"DELETE FROM places WHERE id IN ({placeholders})", merge_ids,
+        )
 
 
 # --- Stats helpers ---

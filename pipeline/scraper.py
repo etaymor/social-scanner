@@ -2,11 +2,13 @@
 
 import logging
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import requests
 from apify_client import ApifyClient
 
 import config
-import db
+from . import db
 
 log = logging.getLogger(__name__)
 
@@ -129,12 +131,18 @@ def _scrape_hashtag(
     return mapped
 
 
+def _scrape_one(client: ApifyClient, platform: str, tag: str,
+                max_posts: int) -> tuple[str, str, list[dict]]:
+    """Scrape a single hashtag (thread-safe). Returns (tag, platform, posts)."""
+    posts = _scrape_hashtag(client, platform, tag, max_posts)
+    return tag, platform, posts
+
+
 def scrape_posts(
     conn: sqlite3.Connection,
     city_id: int,
     city_name: str,
     max_posts: int = 100,
-    verbose: bool = False,
 ) -> int:
     """Scrape pending hashtags for *city_id* and store qualifying posts.
 
@@ -148,43 +156,55 @@ def scrape_posts(
         log.info("No pending hashtags for %s (city_id=%d)", city_name, city_id)
         return 0
 
+    # Mark all as running
+    for row in pending:
+        db.update_hashtag_status(conn, row["id"], "running")
+
+    # Build lookup for hashtag rows
+    hashtag_lookup: dict[tuple[str, str], sqlite3.Row] = {
+        (row["tag"], row["platform"]): row for row in pending
+    }
+
     total_inserted = 0
+    max_workers = min(3, len(pending))
 
-    for idx, row in enumerate(pending, start=1):
-        hashtag_id: int = row["id"]
-        tag: str = row["tag"]
-        platform: str = row["platform"]
+    log.info("Scraping %d hashtags with %d workers...", len(pending), max_workers)
 
-        log.info(
-            "Scraping hashtag %d/%d: %s (%s)...",
-            idx, len(pending), tag, platform,
-        )
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(_scrape_one, client, row["platform"], row["tag"], max_posts): row
+            for row in pending
+        }
 
-        db.update_hashtag_status(conn, hashtag_id, "running")
+        for future in as_completed(futures):
+            row = futures[future]
+            hashtag_id = row["id"]
+            tag = row["tag"]
+            platform = row["platform"]
 
-        try:
-            posts = _scrape_hashtag(client, platform, tag, max_posts)
-            inserted = 0
-            for post_data in posts:
-                if not post_data.get("post_id"):
-                    continue
-                raw_id = db.insert_post(conn, city_id, platform, post_data, hashtag_id)
-                if raw_id is not None:
-                    inserted += 1
-            conn.commit()
+            try:
+                _, _, posts = future.result()
+                inserted = 0
+                for post_data in posts:
+                    if not post_data.get("post_id"):
+                        continue
+                    raw_id = db.insert_post(conn, city_id, platform, post_data, hashtag_id)
+                    if raw_id is not None:
+                        inserted += 1
+                conn.commit()
 
-            db.update_hashtag_status(conn, hashtag_id, "completed")
-            log.info(
-                "Stored %d posts from #%s (%s) for %s",
-                inserted, tag, platform, city_name,
-            )
-            total_inserted += inserted
+                db.update_hashtag_status(conn, hashtag_id, "completed")
+                log.info(
+                    "Stored %d posts from #%s (%s) for %s",
+                    inserted, tag, platform, city_name,
+                )
+                total_inserted += inserted
 
-        except Exception:
-            log.exception(
-                "Failed to scrape #%s (%s) for %s", tag, platform, city_name,
-            )
-            db.update_hashtag_status(conn, hashtag_id, "failed")
+            except (requests.RequestException, KeyError, ValueError):
+                log.exception(
+                    "Failed to scrape #%s (%s) for %s", tag, platform, city_name,
+                )
+                db.update_hashtag_status(conn, hashtag_id, "failed")
 
     log.info(
         "Scraping complete for %s — %d posts stored from %d hashtags",
