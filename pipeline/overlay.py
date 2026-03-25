@@ -23,14 +23,14 @@ log = logging.getLogger(__name__)
 # Constants — Larry's proven viral-format parameters
 # ---------------------------------------------------------------------------
 
-FONT_SIZE_RATIO = 0.065          # 6.5 % of image width
-STROKE_WIDTH_RATIO = 0.15        # 15 % of font size
-MAX_TEXT_WIDTH_RATIO = 0.75       # 75 % of image width
-TEXT_Y_POSITION_RATIO = 0.30      # 30 % from top
-SAFE_ZONE_TOP_RATIO = 0.10       # top 10 % is safe zone
-SAFE_ZONE_BOTTOM_RATIO = 0.20    # bottom 20 % is safe zone
-LINE_HEIGHT_RATIO = 1.25          # 125 % of font size
-SLIDE_NUMBER_FONT_RATIO = 0.04   # smaller font for slide number
+FONT_SIZE_RATIO = 0.065  # 6.5 % of image width
+STROKE_WIDTH_RATIO = 0.15  # 15 % of font size
+MAX_TEXT_WIDTH_RATIO = 0.75  # 75 % of image width
+TEXT_Y_POSITION_RATIO = 0.30  # 30 % from top
+SAFE_ZONE_TOP_RATIO = 0.10  # top 10 % is safe zone
+SAFE_ZONE_BOTTOM_RATIO = 0.20  # bottom 20 % is safe zone
+LINE_HEIGHT_RATIO = 1.25  # 125 % of font size
+SLIDE_NUMBER_FONT_RATIO = 0.04  # smaller font for slide number
 NEIGHBORHOOD_FONT_RATIO = 0.045  # slightly smaller for neighborhood text
 
 # ---------------------------------------------------------------------------
@@ -50,7 +50,7 @@ def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     for font_path in _FONT_PATHS:
         try:
             return ImageFont.truetype(font_path, size)
-        except (OSError, IOError):
+        except OSError:
             continue
 
     log.warning(
@@ -64,6 +64,7 @@ def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
 # ---------------------------------------------------------------------------
 # Text wrapping (ported from Larry's wrapText)
 # ---------------------------------------------------------------------------
+
 
 def wrap_text(
     draw: ImageDraw.ImageDraw,
@@ -110,6 +111,7 @@ def wrap_text(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+
 def _safe_y(start_y: float, total_text_height: float, img_height: int) -> int:
     """Clamp *start_y* so the text block stays inside safe zones."""
     min_y = img_height * SAFE_ZONE_TOP_RATIO
@@ -141,6 +143,7 @@ def _draw_text_with_stroke(
 # Overlay functions — one per slide type
 # ---------------------------------------------------------------------------
 
+
 def add_hook_overlay(image: Image.Image, slide_text: HookSlideText) -> Image.Image:
     """Large centered text overlay for the opening hook slide."""
     img = image.copy()
@@ -166,9 +169,7 @@ def add_hook_overlay(image: Image.Image, slide_text: HookSlideText) -> Image.Ima
     return img
 
 
-def add_location_overlay(
-    image: Image.Image, slide_text: LocationSlideText
-) -> Image.Image:
+def add_location_overlay(image: Image.Image, slide_text: LocationSlideText) -> Image.Image:
     """Place name + neighborhood + slide number overlay."""
     img = image.copy()
     draw = ImageDraw.Draw(img)
@@ -195,11 +196,7 @@ def add_location_overlay(
 
     # Calculate total block height (name lines + gap + neighborhood)
     gap = name_font_size * 0.4
-    total_height = (
-        len(name_lines) * line_height_name
-        + gap
-        + line_height_neigh
-    )
+    total_height = len(name_lines) * line_height_name + gap + line_height_neigh
 
     start_y = (img.height * TEXT_Y_POSITION_RATIO) - (total_height / 2) + (line_height_name / 2)
     y = _safe_y(start_y, total_height, img.height)
@@ -289,9 +286,7 @@ def add_overlays(output_dir: str | Path) -> int:
 
         raw_path = output_dir / f"slide_{idx}_raw.png"
         if not raw_path.exists():
-            log.warning(
-                "Missing raw file for slide %d: %s — skipping", idx, raw_path.name
-            )
+            log.warning("Missing raw file for slide %d: %s — skipping", idx, raw_path.name)
             continue
 
         with Image.open(raw_path) as image:

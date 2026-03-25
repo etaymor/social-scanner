@@ -1,13 +1,13 @@
 """Shared data contracts for the slideshow generation pipeline."""
 
-from dataclasses import dataclass, asdict
-from pathlib import Path
 import json
-
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Slide text dataclasses
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class HookSlideText:
@@ -54,6 +54,7 @@ SlideText = HookSlideText | LocationSlideText | CTASlideText
 # ---------------------------------------------------------------------------
 # Pipeline metadata dataclasses
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class SlideshowMeta:
@@ -112,6 +113,7 @@ def from_texts_json(path: str | Path) -> list[SlideText]:
 # Serialization helpers — meta.json
 # ---------------------------------------------------------------------------
 
+
 def to_meta_json(meta: SlideshowMeta) -> str:
     """Serialize a SlideshowMeta to a JSON string."""
     return json.dumps(asdict(meta), indent=2, ensure_ascii=False)
@@ -120,6 +122,7 @@ def to_meta_json(meta: SlideshowMeta) -> str:
 # ---------------------------------------------------------------------------
 # Serialization helpers — post_meta.json
 # ---------------------------------------------------------------------------
+
 
 def save_post_meta(meta: PostMeta, path: str | Path) -> None:
     """Save a PostMeta to a JSON file."""
@@ -133,5 +136,3 @@ def load_post_meta(path: str | Path) -> PostMeta:
     """Load a PostMeta from a JSON file."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     return PostMeta(**data)
-
-

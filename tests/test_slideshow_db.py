@@ -1,21 +1,19 @@
 """Tests for slideshow database schema extensions and query helpers."""
 
 import sqlite3
-from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from pipeline import db
 import config
-
+from pipeline import db
 
 # ---------------------------------------------------------------------------
 # Helpers to insert test data
 # ---------------------------------------------------------------------------
 
-def _insert_place(conn, city_id, name, virality_score=10.0, is_tourist_trap=False,
-                  category=None):
+
+def _insert_place(conn, city_id, name, virality_score=10.0, is_tourist_trap=False, category=None):
     """Insert a place directly and return its id."""
     cur = conn.execute(
         """INSERT INTO places (city_id, name, type, virality_score, is_tourist_trap, category)
@@ -51,6 +49,7 @@ def _insert_slideshow_with_place(conn, city_id, place_id, created_at=None):
 # Schema and migration tests
 # ---------------------------------------------------------------------------
 
+
 class TestSlideshowSchema:
     def test_init_db_creates_slideshows_table(self, conn):
         """init_db should create the slideshows table."""
@@ -73,7 +72,8 @@ class TestSlideshowSchema:
 
         # Tables still exist with correct structure
         tables = {
-            r["name"] for r in conn.execute(
+            r["name"]
+            for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'",
             ).fetchall()
         }
@@ -114,8 +114,9 @@ class TestNeighborhoodImagePromptColumns:
     def test_columns_default_to_null(self, conn, city_id):
         """neighborhood and image_prompt should default to NULL."""
         place_id = _insert_place(conn, city_id, "TestPlace")
-        row = conn.execute("SELECT neighborhood, image_prompt FROM places WHERE id = ?",
-                           (place_id,)).fetchone()
+        row = conn.execute(
+            "SELECT neighborhood, image_prompt FROM places WHERE id = ?", (place_id,)
+        ).fetchone()
         assert row["neighborhood"] is None
         assert row["image_prompt"] is None
 
@@ -127,8 +128,9 @@ class TestNeighborhoodImagePromptColumns:
             ("Karakoy", "A cozy cafe in Istanbul", place_id),
         )
         conn.commit()
-        row = conn.execute("SELECT neighborhood, image_prompt FROM places WHERE id = ?",
-                           (place_id,)).fetchone()
+        row = conn.execute(
+            "SELECT neighborhood, image_prompt FROM places WHERE id = ?", (place_id,)
+        ).fetchone()
         assert row["neighborhood"] == "Karakoy"
         assert row["image_prompt"] == "A cozy cafe in Istanbul"
 
@@ -237,6 +239,7 @@ class TestNeighborhoodImagePromptColumns:
 # get_available_places tests
 # ---------------------------------------------------------------------------
 
+
 class TestGetAvailablePlaces:
     def test_excludes_tourist_traps(self, conn, city_id):
         """Tourist-trap places should never be returned."""
@@ -250,11 +253,11 @@ class TestGetAvailablePlaces:
 
     def test_excludes_recently_used_places(self, conn, city_id):
         """Places used in recent slideshows (within cooldown) should be excluded."""
-        p1 = _insert_place(conn, city_id, "Fresh Place", virality_score=50.0)
-        p2 = _insert_place(conn, city_id, "Used Place", virality_score=40.0)
+        _insert_place(conn, city_id, "Fresh Place", virality_score=50.0)
+        used_id = _insert_place(conn, city_id, "Used Place", virality_score=40.0)
 
-        # Use p2 in a slideshow created now (within cooldown window)
-        _insert_slideshow_with_place(conn, city_id, p2)
+        # Use the second place in a slideshow created now (within cooldown window)
+        _insert_slideshow_with_place(conn, city_id, used_id)
 
         results = db.get_available_places(conn, city_id)
         names = [r["name"] for r in results]
@@ -266,7 +269,9 @@ class TestGetAvailablePlaces:
         p1 = _insert_place(conn, city_id, "Old Used Place", virality_score=50.0)
 
         # Backdate the slideshow to beyond the cooldown period
-        old_date = (datetime.now() - timedelta(days=config.PLACE_REUSE_COOLDOWN_DAYS + 1)).isoformat()
+        old_date = (
+            datetime.now() - timedelta(days=config.PLACE_REUSE_COOLDOWN_DAYS + 1)
+        ).isoformat()
         _insert_slideshow_with_place(conn, city_id, p1, created_at=old_date)
 
         results = db.get_available_places(conn, city_id)
@@ -275,12 +280,12 @@ class TestGetAvailablePlaces:
 
     def test_allow_reuse_returns_all_non_traps(self, conn, city_id):
         """With allow_reuse=True, recently-used non-trap places should be returned."""
-        p1 = _insert_place(conn, city_id, "Reusable Place", virality_score=50.0)
-        p2 = _insert_place(conn, city_id, "Also Reusable", virality_score=30.0)
-        p3 = _insert_place(conn, city_id, "Still a Trap", virality_score=90.0, is_tourist_trap=True)
+        reusable_id = _insert_place(conn, city_id, "Reusable Place", virality_score=50.0)
+        _insert_place(conn, city_id, "Also Reusable", virality_score=30.0)
+        _insert_place(conn, city_id, "Still a Trap", virality_score=90.0, is_tourist_trap=True)
 
-        # Use p1 in a recent slideshow
-        _insert_slideshow_with_place(conn, city_id, p1)
+        # Use the first place in a recent slideshow
+        _insert_slideshow_with_place(conn, city_id, reusable_id)
 
         results = db.get_available_places(conn, city_id, allow_reuse=True)
         names = [r["name"] for r in results]
@@ -290,12 +295,11 @@ class TestGetAvailablePlaces:
 
     def test_category_filter(self, conn, city_id):
         """Category filter should return only places with matching category."""
-        _insert_place(conn, city_id, "Fancy Restaurant", virality_score=50.0,
-                      category="food_and_drink")
-        _insert_place(conn, city_id, "Cool Bar", virality_score=40.0,
-                      category="nightlife")
-        _insert_place(conn, city_id, "Another Cafe", virality_score=30.0,
-                      category="food_and_drink")
+        _insert_place(
+            conn, city_id, "Fancy Restaurant", virality_score=50.0, category="food_and_drink"
+        )
+        _insert_place(conn, city_id, "Cool Bar", virality_score=40.0, category="nightlife")
+        _insert_place(conn, city_id, "Another Cafe", virality_score=30.0, category="food_and_drink")
 
         results = db.get_available_places(conn, city_id, category="food_and_drink")
         names = [r["name"] for r in results]
@@ -306,12 +310,13 @@ class TestGetAvailablePlaces:
 
     def test_category_filter_with_reuse_exclusion(self, conn, city_id):
         """Category filter and reuse exclusion should work together."""
-        p1 = _insert_place(conn, city_id, "Used Restaurant", virality_score=50.0,
-                           category="food_and_drink")
-        _insert_place(conn, city_id, "Fresh Restaurant", virality_score=40.0,
-                      category="food_and_drink")
-        _insert_place(conn, city_id, "Fresh Bar", virality_score=30.0,
-                      category="nightlife")
+        p1 = _insert_place(
+            conn, city_id, "Used Restaurant", virality_score=50.0, category="food_and_drink"
+        )
+        _insert_place(
+            conn, city_id, "Fresh Restaurant", virality_score=40.0, category="food_and_drink"
+        )
+        _insert_place(conn, city_id, "Fresh Bar", virality_score=30.0, category="nightlife")
 
         _insert_slideshow_with_place(conn, city_id, p1)
 
@@ -344,18 +349,19 @@ class TestGetAvailablePlaces:
 # create_slideshow + add_slideshow_place tests
 # ---------------------------------------------------------------------------
 
+
 class TestCreateSlideshow:
     def test_create_slideshow_returns_id(self, conn, city_id):
         """create_slideshow should return the new slideshow's id."""
-        sid = db.create_slideshow(conn, city_id, "food_and_drink", "listicle",
-                                  "Top 5 hidden eats!", 5, "/tmp/slides")
+        sid = db.create_slideshow(
+            conn, city_id, "food_and_drink", "listicle", "Top 5 hidden eats!", 5, "/tmp/slides"
+        )
         assert isinstance(sid, int)
         assert sid > 0
 
     def test_create_slideshow_stores_data(self, conn, city_id):
         """create_slideshow should persist all fields."""
-        sid = db.create_slideshow(conn, city_id, "nightlife", "story",
-                                  "Best bars!", 3, "/out/bars")
+        sid = db.create_slideshow(conn, city_id, "nightlife", "story", "Best bars!", 3, "/out/bars")
         row = conn.execute("SELECT * FROM slideshows WHERE id = ?", (sid,)).fetchone()
         assert row["city_id"] == city_id
         assert row["category"] == "nightlife"
@@ -369,8 +375,7 @@ class TestCreateSlideshow:
 
     def test_create_slideshow_with_null_category(self, conn, city_id):
         """create_slideshow should allow NULL category."""
-        sid = db.create_slideshow(conn, city_id, None, "listicle",
-                                  "Mixed gems!", 5, "/tmp")
+        sid = db.create_slideshow(conn, city_id, None, "listicle", "Mixed gems!", 5, "/tmp")
         row = conn.execute("SELECT category FROM slideshows WHERE id = ?", (sid,)).fetchone()
         assert row["category"] is None
 
@@ -378,8 +383,7 @@ class TestCreateSlideshow:
         """create_slideshow uses 'with conn:' for atomic transaction."""
         sid = db.create_slideshow(conn, city_id, None, "listicle", "hook", 5, "/tmp")
         # If it was committed atomically, the row should be visible
-        row = conn.execute("SELECT COUNT(*) as cnt FROM slideshows WHERE id = ?",
-                           (sid,)).fetchone()
+        row = conn.execute("SELECT COUNT(*) as cnt FROM slideshows WHERE id = ?", (sid,)).fetchone()
         assert row["cnt"] == 1
 
 
@@ -420,22 +424,25 @@ class TestAddSlideshowPlace:
 # mark_slideshow_posted tests
 # ---------------------------------------------------------------------------
 
+
 class TestMarkSlideshowPosted:
     def test_sets_posted_at_and_postiz_id(self, conn, city_id):
         """mark_slideshow_posted should set posted_at and postiz_post_id."""
         sid = db.create_slideshow(conn, city_id, None, "listicle", "hook", 5, "/tmp")
 
         # Before marking
-        row = conn.execute("SELECT posted_at, postiz_post_id FROM slideshows WHERE id = ?",
-                           (sid,)).fetchone()
+        row = conn.execute(
+            "SELECT posted_at, postiz_post_id FROM slideshows WHERE id = ?", (sid,)
+        ).fetchone()
         assert row["posted_at"] is None
         assert row["postiz_post_id"] is None
 
         # Mark as posted
         db.mark_slideshow_posted(conn, sid, "postiz_abc123")
 
-        row = conn.execute("SELECT posted_at, postiz_post_id FROM slideshows WHERE id = ?",
-                           (sid,)).fetchone()
+        row = conn.execute(
+            "SELECT posted_at, postiz_post_id FROM slideshows WHERE id = ?", (sid,)
+        ).fetchone()
         assert row["posted_at"] is not None
         assert row["postiz_post_id"] == "postiz_abc123"
 
@@ -447,5 +454,5 @@ class TestMarkSlideshowPosted:
         row = conn.execute("SELECT posted_at FROM slideshows WHERE id = ?", (sid,)).fetchone()
         posted = datetime.fromisoformat(row["posted_at"])
         # CURRENT_TIMESTAMP in SQLite is UTC (naive)
-        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+        now_utc = datetime.now(UTC).replace(tzinfo=None)
         assert abs((now_utc - posted).total_seconds()) < 5

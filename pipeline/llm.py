@@ -25,7 +25,9 @@ class CreditsExhaustedError(LLMError):
     pass
 
 
-def call_llm(prompt: str, *, system: str = None, model: str = None, temperature: float = 0.7) -> str:
+def call_llm(
+    prompt: str, *, system: str | None = None, model: str | None = None, temperature: float = 0.7
+) -> str:
     """Send a prompt to OpenRouter and return the text response.
 
     Retries on transient errors with exponential backoff.
@@ -51,7 +53,10 @@ def call_llm(prompt: str, *, system: str = None, model: str = None, temperature:
 
     def _do_call():
         resp = requests.post(
-            OPENROUTER_BASE_URL, headers=headers, json=payload, timeout=120,
+            OPENROUTER_BASE_URL,
+            headers=headers,
+            json=payload,
+            timeout=120,
         )
         if resp.status_code == 402:
             raise CreditsExhaustedError(
@@ -77,6 +82,7 @@ def call_llm(prompt: str, *, system: str = None, model: str = None, temperature:
 def sanitize_text(text: str, max_length: int = 2000) -> str:
     """Strip control characters and limit length for safe LLM prompt insertion."""
     import re
+
     cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
     return cleaned[:max_length]
 
@@ -107,7 +113,7 @@ def call_llm_json(prompt: str, **kwargs) -> list[object] | dict[str, object]:
             end = text.rfind(end_char)
             if start != -1 and end != -1 and end > start:
                 try:
-                    return json.loads(text[start:end + 1])
+                    return json.loads(text[start : end + 1])
                 except json.JSONDecodeError:
                     continue
-        raise LLMError(f"Failed to parse LLM response as JSON: {raw[:200]}")
+        raise LLMError(f"Failed to parse LLM response as JSON: {raw[:200]}") from None

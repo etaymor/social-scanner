@@ -1,12 +1,11 @@
 """Tests for LLM wrapper: retry logic, JSON parsing, error handling."""
 
-import json
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
 
-from pipeline.llm import call_llm, call_llm_json, LLMError, CreditsExhaustedError, sanitize_text
+from pipeline.llm import CreditsExhaustedError, LLMError, call_llm, call_llm_json, sanitize_text
 
 
 class TestSanitizeText:
@@ -44,7 +43,7 @@ class TestCallLlmJson:
 
     @patch("pipeline.llm.call_llm")
     def test_json_array_extraction(self, mock_llm):
-        mock_llm.return_value = 'Result: [1, 2, 3] end'
+        mock_llm.return_value = "Result: [1, 2, 3] end"
         result = call_llm_json("test prompt")
         assert result == [1, 2, 3]
 
@@ -67,9 +66,7 @@ class TestCallLlm:
     def test_success(self, mock_post):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        mock_resp.json.return_value = {
-            "choices": [{"message": {"content": "hello"}}]
-        }
+        mock_resp.json.return_value = {"choices": [{"message": {"content": "hello"}}]}
         mock_post.return_value = mock_resp
 
         result = call_llm("test")
@@ -93,9 +90,7 @@ class TestCallLlm:
 
         ok_resp = MagicMock()
         ok_resp.status_code = 200
-        ok_resp.json.return_value = {
-            "choices": [{"message": {"content": "ok"}}]
-        }
+        ok_resp.json.return_value = {"choices": [{"message": {"content": "ok"}}]}
 
         mock_post.side_effect = [fail_resp, ok_resp]
         result = call_llm("test")
@@ -111,9 +106,7 @@ class TestCallLlm:
 
         ok_resp = MagicMock()
         ok_resp.status_code = 200
-        ok_resp.json.return_value = {
-            "choices": [{"message": {"content": "ok"}}]
-        }
+        ok_resp.json.return_value = {"choices": [{"message": {"content": "ok"}}]}
 
         mock_post.side_effect = [rate_resp, ok_resp]
         result = call_llm("test")
@@ -124,9 +117,7 @@ class TestCallLlm:
     def test_system_message_sent(self, mock_post):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        mock_resp.json.return_value = {
-            "choices": [{"message": {"content": "hi"}}]
-        }
+        mock_resp.json.return_value = {"choices": [{"message": {"content": "hi"}}]}
         mock_post.return_value = mock_resp
 
         call_llm("user msg", system="sys msg")

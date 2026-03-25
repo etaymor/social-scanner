@@ -1,21 +1,25 @@
 """Tests for the LLM enrichment module (neighborhood + image_prompt)."""
 
-import json
-import sqlite3
-from unittest.mock import call, patch
-
-import pytest
+from unittest.mock import patch
 
 from pipeline import db
-from pipeline.enrichment import enrich_places, _needs_enrichment, _extract_results
-
+from pipeline.enrichment import _extract_results, _needs_enrichment, enrich_places
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _insert_place(conn, city_id, name, place_type="restaurant", category="food_and_drink",
-                  sample_caption="A great spot", neighborhood=None, image_prompt=None):
+
+def _insert_place(
+    conn,
+    city_id,
+    name,
+    place_type="restaurant",
+    category="food_and_drink",
+    sample_caption="A great spot",
+    neighborhood=None,
+    image_prompt=None,
+):
     """Insert a place and return its id."""
     cur = conn.execute(
         """INSERT INTO places (city_id, name, type, category, sample_caption,
@@ -35,13 +39,15 @@ def _make_llm_response(enrichments: list[dict]) -> dict:
 def _get_place(conn, place_id):
     """Fetch a place row by id."""
     return conn.execute(
-        "SELECT * FROM places WHERE id = ?", (place_id,),
+        "SELECT * FROM places WHERE id = ?",
+        (place_id,),
     ).fetchone()
 
 
 # ---------------------------------------------------------------------------
 # Unit tests for _needs_enrichment
 # ---------------------------------------------------------------------------
+
 
 class TestNeedsEnrichment:
     def test_missing_both(self, conn, city_id):
@@ -60,8 +66,9 @@ class TestNeedsEnrichment:
         assert _needs_enrichment(place) is True
 
     def test_has_both(self, conn, city_id):
-        pid = _insert_place(conn, city_id, "Complete",
-                            neighborhood="Beyoglu", image_prompt="A warm cafe")
+        pid = _insert_place(
+            conn, city_id, "Complete", neighborhood="Beyoglu", image_prompt="A warm cafe"
+        )
         place = _get_place(conn, pid)
         assert _needs_enrichment(place) is False
 
@@ -69,6 +76,7 @@ class TestNeedsEnrichment:
 # ---------------------------------------------------------------------------
 # Unit tests for _extract_results
 # ---------------------------------------------------------------------------
+
 
 class TestExtractResults:
     def test_dict_with_results_key(self):
@@ -99,12 +107,18 @@ class TestExtractResults:
 # Integration tests for enrich_places
 # ---------------------------------------------------------------------------
 
+
 class TestEnrichPlaces:
     @patch("pipeline.enrichment.call_llm_json")
     def test_skips_already_enriched_places(self, mock_llm, conn, city_id):
         """Places with existing enrichment (both fields) should be skipped entirely."""
-        _insert_place(conn, city_id, "Complete Place",
-                      neighborhood="Sultanahmet", image_prompt="A grand mosque")
+        _insert_place(
+            conn,
+            city_id,
+            "Complete Place",
+            neighborhood="Sultanahmet",
+            image_prompt="A grand mosque",
+        )
 
         places = db.get_all_places(conn, city_id)
         result = enrich_places(conn, places, "Istanbul")
@@ -116,13 +130,20 @@ class TestEnrichPlaces:
     def test_enriches_places_missing_fields(self, mock_llm, conn, city_id):
         """Places missing either neighborhood or image_prompt should be enriched."""
         pid1 = _insert_place(conn, city_id, "Place A")  # missing both
-        pid2 = _insert_place(conn, city_id, "Place B",
-                             neighborhood="Beyoglu")  # missing image_prompt
+        pid2 = _insert_place(
+            conn, city_id, "Place B", neighborhood="Beyoglu"
+        )  # missing image_prompt
 
-        mock_llm.return_value = _make_llm_response([
-            {"place_id": pid1, "neighborhood": "Kadikoy", "image_prompt": "A vibrant market scene"},
-            {"place_id": pid2, "neighborhood": "Beyoglu", "image_prompt": "A cozy rooftop bar"},
-        ])
+        mock_llm.return_value = _make_llm_response(
+            [
+                {
+                    "place_id": pid1,
+                    "neighborhood": "Kadikoy",
+                    "image_prompt": "A vibrant market scene",
+                },
+                {"place_id": pid2, "neighborhood": "Beyoglu", "image_prompt": "A cozy rooftop bar"},
+            ]
+        )
 
         places = db.get_all_places(conn, city_id)
         result = enrich_places(conn, places, "Istanbul")
@@ -152,11 +173,16 @@ class TestEnrichPlaces:
         # First batch fails, second batch succeeds
         mock_llm.side_effect = [
             LLMError("Simulated failure"),
-            _make_llm_response([
-                {"place_id": pids[j], "neighborhood": f"District {j}",
-                 "image_prompt": f"Description {j}"}
-                for j in range(10, 15)
-            ]),
+            _make_llm_response(
+                [
+                    {
+                        "place_id": pids[j],
+                        "neighborhood": f"District {j}",
+                        "image_prompt": f"Description {j}",
+                    }
+                    for j in range(10, 15)
+                ]
+            ),
         ]
 
         places = db.get_all_places(conn, city_id)
@@ -186,11 +212,12 @@ class TestEnrichPlaces:
             pid = _insert_place(conn, city_id, f"Small Batch Place {i}")
             pids.append(pid)
 
-        mock_llm.return_value = _make_llm_response([
-            {"place_id": pids[j], "neighborhood": f"Area {j}",
-             "image_prompt": f"Visual {j}"}
-            for j in range(3)
-        ])
+        mock_llm.return_value = _make_llm_response(
+            [
+                {"place_id": pids[j], "neighborhood": f"Area {j}", "image_prompt": f"Visual {j}"}
+                for j in range(3)
+            ]
+        )
 
         places = db.get_all_places(conn, city_id)
         result = enrich_places(conn, places, "Istanbul")
@@ -208,9 +235,11 @@ class TestEnrichPlaces:
         """Running enrichment twice should not make duplicate LLM calls."""
         pid = _insert_place(conn, city_id, "Idempotent Place")
 
-        mock_llm.return_value = _make_llm_response([
-            {"place_id": pid, "neighborhood": "Karakoy", "image_prompt": "A scenic dock"},
-        ])
+        mock_llm.return_value = _make_llm_response(
+            [
+                {"place_id": pid, "neighborhood": "Karakoy", "image_prompt": "A scenic dock"},
+            ]
+        )
 
         # First run
         places = db.get_all_places(conn, city_id)
@@ -250,11 +279,12 @@ class TestEnrichPlaces:
                     assert place["image_prompt"] is not None
 
             batch_pids = pids[:10] if call_count == 1 else pids[10:15]
-            return _make_llm_response([
-                {"place_id": pid, "neighborhood": f"N-{pid}",
-                 "image_prompt": f"Desc-{pid}"}
-                for pid in batch_pids
-            ])
+            return _make_llm_response(
+                [
+                    {"place_id": pid, "neighborhood": f"N-{pid}", "image_prompt": f"Desc-{pid}"}
+                    for pid in batch_pids
+                ]
+            )
 
         mock_llm.side_effect = side_effect_fn
 
@@ -271,11 +301,13 @@ class TestEnrichPlaces:
         pid2 = _insert_place(conn, city_id, "Missing Neighborhood")
         pid3 = _insert_place(conn, city_id, "Missing Image Prompt")
 
-        mock_llm.return_value = _make_llm_response([
-            {"place_id": pid1, "neighborhood": "Cihangir", "image_prompt": "Beautiful street"},
-            {"place_id": pid2, "neighborhood": "", "image_prompt": "Some image"},
-            {"place_id": pid3, "neighborhood": "Nisantasi", "image_prompt": ""},
-        ])
+        mock_llm.return_value = _make_llm_response(
+            [
+                {"place_id": pid1, "neighborhood": "Cihangir", "image_prompt": "Beautiful street"},
+                {"place_id": pid2, "neighborhood": "", "image_prompt": "Some image"},
+                {"place_id": pid3, "neighborhood": "Nisantasi", "image_prompt": ""},
+            ]
+        )
 
         places = db.get_all_places(conn, city_id)
         result = enrich_places(conn, places, "Istanbul")

@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from generate_slideshow import build_parser, main, _normalize_raw_filenames
+from generate_slideshow import _normalize_raw_filenames, build_parser, main
 from pipeline import db
 from pipeline.slideshow_types import PostMeta
 
@@ -39,6 +39,7 @@ class _UnclosableConnection:
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def mem_conn():
     """In-memory database with schema and seed data."""
@@ -56,9 +57,17 @@ def seeded_conn(mem_conn):
             """INSERT INTO places (city_id, name, type, category, virality_score,
                is_tourist_trap, sample_caption, neighborhood, image_prompt)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (city_id, f"Place {i+1}", "restaurant", "food_and_drink",
-             100.0 - i, False, f"Great place {i+1}", f"District {i+1}",
-             f"A cozy restaurant in Tokyo district {i+1}"),
+            (
+                city_id,
+                f"Place {i + 1}",
+                "restaurant",
+                "food_and_drink",
+                100.0 - i,
+                False,
+                f"Great place {i + 1}",
+                f"District {i + 1}",
+                f"A cozy restaurant in Tokyo district {i + 1}",
+            ),
         )
     # Add 2 tourist traps (should be excluded)
     for i in range(2):
@@ -66,8 +75,7 @@ def seeded_conn(mem_conn):
             """INSERT INTO places (city_id, name, type, category, virality_score,
                is_tourist_trap)
                VALUES (?, ?, ?, ?, ?, ?)""",
-            (city_id, f"Tourist Trap {i+1}", "restaurant", "food_and_drink",
-             200.0, True),
+            (city_id, f"Tourist Trap {i + 1}", "restaurant", "food_and_drink", 200.0, True),
         )
     mem_conn.commit()
     return mem_conn
@@ -76,6 +84,7 @@ def seeded_conn(mem_conn):
 # ---------------------------------------------------------------------------
 # Parser tests
 # ---------------------------------------------------------------------------
+
 
 class TestBuildParser:
     def test_required_city(self):
@@ -95,15 +104,22 @@ class TestBuildParser:
 
     def test_all_options(self):
         parser = build_parser()
-        args = parser.parse_args([
-            "--city", "Tokyo",
-            "--category", "food_and_drink",
-            "--slide-count", "6",
-            "--format", "story",
-            "--post",
-            "--allow-reuse",
-            "--cta-template", "/path/to/cta.png",
-        ])
+        args = parser.parse_args(
+            [
+                "--city",
+                "Tokyo",
+                "--category",
+                "food_and_drink",
+                "--slide-count",
+                "6",
+                "--format",
+                "story",
+                "--post",
+                "--allow-reuse",
+                "--cta-template",
+                "/path/to/cta.png",
+            ]
+        )
         assert args.category == "food_and_drink"
         assert args.slide_count == 6
         assert args.hook_format == "story"
@@ -120,6 +136,7 @@ class TestBuildParser:
 # ---------------------------------------------------------------------------
 # Normalize filename tests
 # ---------------------------------------------------------------------------
+
 
 class TestNormalizeRawFilenames:
     def test_renames_hook_file(self, tmp_path):
@@ -147,17 +164,25 @@ class TestNormalizeRawFilenames:
 # Integration test helper
 # ---------------------------------------------------------------------------
 
+
 def _run_pipeline(seeded_conn, tmp_path, args_list, mock_post=None):
     """Run main() with all external dependencies mocked."""
     mock_enrich = MagicMock(return_value=0)
-    mock_hook = MagicMock(return_value={
-        "hook_text": "4 places in Tokyo\ntourists never find",
-        "hook_image_prompt": "A stunning shot of Tokyo",
-        "caption": "Tokyo hidden gems #tokyo #travel",
-    })
-    mock_img_gen = MagicMock(return_value={
-        "generated": 6, "skipped": 0, "failed": 0, "failed_slides": [],
-    })
+    mock_hook = MagicMock(
+        return_value={
+            "hook_text": "4 places in Tokyo\ntourists never find",
+            "hook_image_prompt": "A stunning shot of Tokyo",
+            "caption": "Tokyo hidden gems #tokyo #travel",
+        }
+    )
+    mock_img_gen = MagicMock(
+        return_value={
+            "generated": 6,
+            "skipped": 0,
+            "failed": 0,
+            "failed_slides": [],
+        }
+    )
 
     def fake_overlay(output_dir):
         for i in range(1, 7):
@@ -165,20 +190,25 @@ def _run_pipeline(seeded_conn, tmp_path, args_list, mock_post=None):
         return 6
 
     mock_overlay = MagicMock(side_effect=fake_overlay)
-    mock_post_fn = mock_post or MagicMock(return_value=PostMeta(
-        postiz_post_id="post_123", posted_at="2026-03-24T12:00:00",
-    ))
+    mock_post_fn = mock_post or MagicMock(
+        return_value=PostMeta(
+            postiz_post_id="post_123",
+            posted_at="2026-03-24T12:00:00",
+        )
+    )
 
     wrapped_conn = _UnclosableConnection(seeded_conn)
 
-    with patch("sys.argv", ["generate_slideshow.py"] + args_list), \
-         patch("generate_slideshow.db.get_connection", return_value=wrapped_conn), \
-         patch("pipeline.enrichment.enrich_places", mock_enrich), \
-         patch("pipeline.hooks.generate_hook", mock_hook), \
-         patch("pipeline.image_gen.generate_slideshow_images", mock_img_gen), \
-         patch("pipeline.overlay.add_overlays", mock_overlay), \
-         patch("pipeline.posting.post_slideshow", mock_post_fn), \
-         patch("generate_slideshow.SLIDESHOW_OUTPUT_DIR", tmp_path):
+    with (
+        patch("sys.argv", ["generate_slideshow.py", *args_list]),
+        patch("generate_slideshow.db.get_connection", return_value=wrapped_conn),
+        patch("pipeline.enrichment.enrich_places", mock_enrich),
+        patch("pipeline.hooks.generate_hook", mock_hook),
+        patch("pipeline.image_gen.generate_slideshow_images", mock_img_gen),
+        patch("pipeline.overlay.add_overlays", mock_overlay),
+        patch("pipeline.posting.post_slideshow", mock_post_fn),
+        patch("generate_slideshow.SLIDESHOW_OUTPUT_DIR", tmp_path),
+    ):
         main()
 
     return {
@@ -194,8 +224,8 @@ def _run_pipeline(seeded_conn, tmp_path, args_list, mock_post=None):
 # Integration tests
 # ---------------------------------------------------------------------------
 
-class TestMainIntegration:
 
+class TestMainIntegration:
     def test_full_pipeline(self, seeded_conn, tmp_path):
         mocks = _run_pipeline(seeded_conn, tmp_path, ["--city", "Tokyo", "--slide-count", "4"])
         mocks["enrich"].assert_called_once()
@@ -248,9 +278,7 @@ class TestMainIntegration:
         assert row["slide_count"] == 5
 
     def test_aborts_when_fewer_than_4_places(self, seeded_conn, tmp_path):
-        seeded_conn.execute(
-            "DELETE FROM places WHERE name NOT IN ('Place 1','Place 2','Place 3')"
-        )
+        seeded_conn.execute("DELETE FROM places WHERE name NOT IN ('Place 1','Place 2','Place 3')")
         seeded_conn.commit()
         with pytest.raises(SystemExit):
             _run_pipeline(seeded_conn, tmp_path, ["--city", "Tokyo", "--slide-count", "4"])
@@ -268,14 +296,18 @@ class TestMainIntegration:
             _run_pipeline(seeded_conn, tmp_path, ["--city", "Tokyo", "--slide-count", "20"])
 
     def test_category_filter(self, seeded_conn, tmp_path):
-        _run_pipeline(seeded_conn, tmp_path,
-                      ["--city", "Tokyo", "--slide-count", "4", "--category", "food_and_drink"])
+        _run_pipeline(
+            seeded_conn,
+            tmp_path,
+            ["--city", "Tokyo", "--slide-count", "4", "--category", "food_and_drink"],
+        )
         row = seeded_conn.execute("SELECT * FROM slideshows").fetchone()
         assert row["category"] == "food_and_drink"
 
     def test_story_format(self, seeded_conn, tmp_path):
-        _run_pipeline(seeded_conn, tmp_path,
-                      ["--city", "Tokyo", "--slide-count", "4", "--format", "story"])
+        _run_pipeline(
+            seeded_conn, tmp_path, ["--city", "Tokyo", "--slide-count", "4", "--format", "story"]
+        )
         row = seeded_conn.execute("SELECT * FROM slideshows").fetchone()
         assert row["format"] == "story"
 
@@ -290,19 +322,17 @@ class TestMainIntegration:
 
 
 class TestPostingIntegration:
-
     def test_post_flag_triggers_posting(self, seeded_conn, tmp_path):
-        mocks = _run_pipeline(seeded_conn, tmp_path,
-                              ["--city", "Tokyo", "--slide-count", "4", "--post"])
+        mocks = _run_pipeline(
+            seeded_conn, tmp_path, ["--city", "Tokyo", "--slide-count", "4", "--post"]
+        )
         mocks["post"].assert_called_once()
 
     def test_post_updates_db(self, seeded_conn, tmp_path):
-        _run_pipeline(seeded_conn, tmp_path,
-                      ["--city", "Tokyo", "--slide-count", "4", "--post"])
+        _run_pipeline(seeded_conn, tmp_path, ["--city", "Tokyo", "--slide-count", "4", "--post"])
         row = seeded_conn.execute("SELECT * FROM slideshows").fetchone()
         assert row["postiz_post_id"] == "post_123"
 
     def test_no_post_flag_skips_posting(self, seeded_conn, tmp_path):
-        mocks = _run_pipeline(seeded_conn, tmp_path,
-                              ["--city", "Tokyo", "--slide-count", "4"])
+        mocks = _run_pipeline(seeded_conn, tmp_path, ["--city", "Tokyo", "--slide-count", "4"])
         mocks["post"].assert_not_called()

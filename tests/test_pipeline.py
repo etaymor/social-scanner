@@ -1,16 +1,15 @@
 """Integration test for the full pipeline with mocked API responses."""
 
-import sqlite3
 from unittest.mock import patch
 
 import pytest
 
 from pipeline import db
 
-
 # ---------------------------------------------------------------------------
 # DB layer tests
 # ---------------------------------------------------------------------------
+
 
 class TestDatabase:
     def test_create_and_get_city(self, conn):
@@ -23,18 +22,19 @@ class TestDatabase:
         db.insert_hashtags(conn, city_id, ["test"])
         db.reset_city(conn, city_id)
         # City should be gone
-        row = conn.execute("SELECT COUNT(*) as cnt FROM cities WHERE id = ?",
-                           (city_id,)).fetchone()
+        row = conn.execute("SELECT COUNT(*) as cnt FROM cities WHERE id = ?", (city_id,)).fetchone()
         assert row["cnt"] == 0
         # Hashtags should cascade-delete
-        row = conn.execute("SELECT COUNT(*) as cnt FROM hashtags WHERE city_id = ?",
-                           (city_id,)).fetchone()
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM hashtags WHERE city_id = ?", (city_id,)
+        ).fetchone()
         assert row["cnt"] == 0
 
     def test_insert_hashtags_creates_both_platforms(self, conn, city_id):
         db.insert_hashtags(conn, city_id, ["foodie"])
         rows = conn.execute(
-            "SELECT * FROM hashtags WHERE city_id = ?", (city_id,),
+            "SELECT * FROM hashtags WHERE city_id = ?",
+            (city_id,),
         ).fetchall()
         assert len(rows) == 2
         platforms = {r["platform"] for r in rows}
@@ -44,7 +44,8 @@ class TestDatabase:
         db.insert_hashtags(conn, city_id, ["foodie"])
         db.insert_hashtags(conn, city_id, ["foodie"])
         rows = conn.execute(
-            "SELECT * FROM hashtags WHERE city_id = ?", (city_id,),
+            "SELECT * FROM hashtags WHERE city_id = ?",
+            (city_id,),
         ).fetchall()
         assert len(rows) == 2  # Still just 2 (one per platform)
 
@@ -55,12 +56,18 @@ class TestDatabase:
             (city_id,),
         ).fetchone()
 
-        raw_id = db.insert_post(conn, city_id, "tiktok", {
-            "post_id": "abc123",
-            "caption": "Great cafe!",
-            "likes": 100,
-            "views": 5000,
-        }, hashtag["id"])
+        raw_id = db.insert_post(
+            conn,
+            city_id,
+            "tiktok",
+            {
+                "post_id": "abc123",
+                "caption": "Great cafe!",
+                "likes": 100,
+                "views": 5000,
+            },
+            hashtag["id"],
+        )
         conn.commit()
 
         assert raw_id is not None
@@ -85,7 +92,8 @@ class TestDatabase:
 
         # Both hashtag links should exist
         links = conn.execute(
-            "SELECT * FROM post_hashtags WHERE post_id = ?", (id1,),
+            "SELECT * FROM post_hashtags WHERE post_id = ?",
+            (id1,),
         ).fetchall()
         assert len(links) == 2
 
@@ -160,6 +168,7 @@ class TestDatabase:
 # Hashtag generation integration test
 # ---------------------------------------------------------------------------
 
+
 class TestHashtagGeneration:
     @patch("pipeline.hashtags.call_llm_json")
     def test_generate_hashtags(self, mock_llm, conn, city_id):
@@ -168,6 +177,7 @@ class TestHashtagGeneration:
         }
 
         from pipeline.hashtags import generate_hashtags
+
         tags = generate_hashtags(conn, city_id, "Istanbul")
 
         # Should have LLM tags + hardcoded (deduped)
@@ -178,7 +188,8 @@ class TestHashtagGeneration:
 
         # Should be stored in DB
         rows = conn.execute(
-            "SELECT DISTINCT tag FROM hashtags WHERE city_id = ?", (city_id,),
+            "SELECT DISTINCT tag FROM hashtags WHERE city_id = ?",
+            (city_id,),
         ).fetchall()
         assert len(rows) == len(tags)
 
@@ -186,6 +197,7 @@ class TestHashtagGeneration:
 # ---------------------------------------------------------------------------
 # Extractor integration test
 # ---------------------------------------------------------------------------
+
 
 class TestExtraction:
     @patch("pipeline.extractor.call_llm_json")
@@ -218,6 +230,7 @@ class TestExtraction:
         }
 
         from pipeline.extractor import extract_places
+
         count = extract_places(conn, city_id, "Istanbul")
 
         assert count == 2  # Two posts mentioned Mikla
@@ -251,6 +264,7 @@ class TestExtraction:
         mock_llm.side_effect = LLMError("Simulated failure")
 
         from pipeline.extractor import extract_places
+
         count = extract_places(conn, city_id, "Istanbul")
 
         assert count == 0
@@ -262,6 +276,7 @@ class TestExtraction:
 # ---------------------------------------------------------------------------
 # Filter integration test
 # ---------------------------------------------------------------------------
+
 
 class TestFilter:
     @patch("pipeline.filter.call_llm_json")
@@ -285,6 +300,7 @@ class TestFilter:
         }
 
         from pipeline.filter import filter_tourist_traps
+
         filter_tourist_traps(conn, city_id, "Istanbul")
 
         places = conn.execute(
@@ -315,6 +331,7 @@ class TestFilter:
         }
 
         from pipeline.filter import filter_tourist_traps
+
         filter_tourist_traps(conn, city_id, "Istanbul")
 
         row = conn.execute(
@@ -344,6 +361,7 @@ class TestFilter:
         }
 
         from pipeline.filter import filter_tourist_traps
+
         filter_tourist_traps(conn, city_id, "Istanbul")
 
         places = conn.execute(
@@ -375,6 +393,7 @@ class TestFilter:
         }
 
         from pipeline.filter import filter_tourist_traps
+
         filter_tourist_traps(conn, city_id, "Istanbul")
 
         places = conn.execute(
@@ -391,27 +410,47 @@ class TestNormalizeBool:
 
     def test_real_booleans(self):
         from pipeline.filter import _normalize_bool
+
         assert _normalize_bool(True) is True
         assert _normalize_bool(False) is False
 
-    @pytest.mark.parametrize("val,expected", [
-        (1, True), (0, False), (1.0, True), (0.0, False), (-1, True),
-    ])
+    @pytest.mark.parametrize(
+        "val,expected",
+        [
+            (1, True),
+            (0, False),
+            (1.0, True),
+            (0.0, False),
+            (-1, True),
+        ],
+    )
     def test_numeric(self, val, expected):
         from pipeline.filter import _normalize_bool
+
         assert _normalize_bool(val) is expected
 
-    @pytest.mark.parametrize("val,expected", [
-        ("true", True), ("True", True), ("TRUE", True),
-        ("false", False), ("False", False), ("FALSE", False),
-        ("1", True), ("0", False),
-        ("yes", True), ("no", False),
-    ])
+    @pytest.mark.parametrize(
+        "val,expected",
+        [
+            ("true", True),
+            ("True", True),
+            ("TRUE", True),
+            ("false", False),
+            ("False", False),
+            ("FALSE", False),
+            ("1", True),
+            ("0", False),
+            ("yes", True),
+            ("no", False),
+        ],
+    )
     def test_string_representations(self, val, expected):
         from pipeline.filter import _normalize_bool
+
         assert _normalize_bool(val) is expected
 
     @pytest.mark.parametrize("val", [None, "", "maybe", [], {}])
     def test_unrecognized_defaults_to_false(self, val):
         from pipeline.filter import _normalize_bool
+
         assert _normalize_bool(val) is False

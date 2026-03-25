@@ -2,18 +2,17 @@
 
 from pathlib import Path
 
-import pytest
 from PIL import Image
 
 from pipeline.overlay import (
+    FONT_SIZE_RATIO,
+    MAX_TEXT_WIDTH_RATIO,
     add_cta_overlay,
     add_hook_overlay,
     add_location_overlay,
     add_overlays,
     load_font,
     wrap_text,
-    FONT_SIZE_RATIO,
-    MAX_TEXT_WIDTH_RATIO,
 )
 from pipeline.slideshow_types import (
     CTASlideText,
@@ -21,7 +20,6 @@ from pipeline.slideshow_types import (
     LocationSlideText,
     to_texts_json,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -62,15 +60,14 @@ def _setup_output_dir(tmp_path: Path, location_count: int = 3) -> list:
     slides = _make_slides(location_count)
     total = len(slides)
     _save_raw_slides(tmp_path, total)
-    (tmp_path / "texts.json").write_text(
-        to_texts_json(slides), encoding="utf-8"
-    )
+    (tmp_path / "texts.json").write_text(to_texts_json(slides), encoding="utf-8")
     return slides
 
 
 # ---------------------------------------------------------------------------
 # 1. Output file count matches input slide count
 # ---------------------------------------------------------------------------
+
 
 class TestOutputCount:
     def test_output_count_matches_input(self, tmp_path: Path):
@@ -88,6 +85,7 @@ class TestOutputCount:
 # 2. Each output file is a valid PNG (magic bytes)
 # ---------------------------------------------------------------------------
 
+
 class TestValidPNG:
     def test_output_files_are_valid_png(self, tmp_path: Path):
         slides = _setup_output_dir(tmp_path)
@@ -104,6 +102,7 @@ class TestValidPNG:
 # 3. Each output file is larger than the corresponding raw input
 # ---------------------------------------------------------------------------
 
+
 class TestOutputLargerThanRaw:
     def test_overlaid_files_are_larger(self, tmp_path: Path):
         slides = _setup_output_dir(tmp_path)
@@ -113,14 +112,14 @@ class TestOutputLargerThanRaw:
             raw_size = (tmp_path / f"slide_{i}_raw.png").stat().st_size
             out_size = (tmp_path / f"slide_{i}.png").stat().st_size
             assert out_size > raw_size, (
-                f"slide_{i}.png ({out_size}) should be larger than "
-                f"slide_{i}_raw.png ({raw_size})"
+                f"slide_{i}.png ({out_size}) should be larger than slide_{i}_raw.png ({raw_size})"
             )
 
 
 # ---------------------------------------------------------------------------
 # 4. Correct layout for each slide type
 # ---------------------------------------------------------------------------
+
 
 class TestSlideTypeLayouts:
     def test_hook_overlay_returns_same_dimensions(self):
@@ -167,9 +166,9 @@ class TestSlideTypeLayouts:
 # 5. Long text auto-wraps within max width
 # ---------------------------------------------------------------------------
 
+
 class TestTextWrapping:
     def test_short_text_no_wrap(self):
-        img = _solid_image()
         draw = Image.new("RGB", (WIDTH, HEIGHT))
         draw_ctx = __import__("PIL.ImageDraw", fromlist=["ImageDraw"]).Draw(draw)
         font_size = max(1, round(WIDTH * FONT_SIZE_RATIO))
@@ -222,6 +221,7 @@ class TestTextWrapping:
 # 6. Idempotent: running overlay twice produces identical output
 # ---------------------------------------------------------------------------
 
+
 class TestIdempotent:
     def test_running_twice_produces_same_output(self, tmp_path: Path):
         slides = _setup_output_dir(tmp_path)
@@ -248,18 +248,17 @@ class TestIdempotent:
 # 7. Missing raw files handled gracefully
 # ---------------------------------------------------------------------------
 
+
 class TestMissingRawFiles:
     def test_missing_raw_is_skipped(self, tmp_path: Path, caplog):
         slides = _make_slides(2)  # hook + 2 locations + CTA = 4
-        total = len(slides)
-        (tmp_path / "texts.json").write_text(
-            to_texts_json(slides), encoding="utf-8"
-        )
+        (tmp_path / "texts.json").write_text(to_texts_json(slides), encoding="utf-8")
         # Only create raw files for slides 1 and 3, skip 2 and 4
         _solid_image().save(tmp_path / "slide_1_raw.png", format="PNG")
         _solid_image().save(tmp_path / "slide_3_raw.png", format="PNG")
 
         import logging
+
         with caplog.at_level(logging.WARNING, logger="pipeline.overlay"):
             count = add_overlays(tmp_path)
 
@@ -275,9 +274,7 @@ class TestMissingRawFiles:
 
     def test_all_missing_returns_zero(self, tmp_path: Path):
         slides = _make_slides(1)
-        (tmp_path / "texts.json").write_text(
-            to_texts_json(slides), encoding="utf-8"
-        )
+        (tmp_path / "texts.json").write_text(to_texts_json(slides), encoding="utf-8")
         # No raw files at all
         count = add_overlays(tmp_path)
         assert count == 0
@@ -286,6 +283,7 @@ class TestMissingRawFiles:
 # ---------------------------------------------------------------------------
 # 8. Slide number counter is accurate
 # ---------------------------------------------------------------------------
+
 
 class TestSlideNumberAccuracy:
     def test_slide_numbers_sequential(self, tmp_path: Path):
@@ -301,9 +299,7 @@ class TestSlideNumberAccuracy:
         # Write and process
         total = len(slides)
         _save_raw_slides(tmp_path, total)
-        (tmp_path / "texts.json").write_text(
-            to_texts_json(slides), encoding="utf-8"
-        )
+        (tmp_path / "texts.json").write_text(to_texts_json(slides), encoding="utf-8")
 
         count = add_overlays(tmp_path)
         assert count == total
@@ -334,6 +330,7 @@ class TestSlideNumberAccuracy:
 # ---------------------------------------------------------------------------
 # Edge-case: load_font returns something usable
 # ---------------------------------------------------------------------------
+
 
 class TestLoadFont:
     def test_load_font_returns_font(self):

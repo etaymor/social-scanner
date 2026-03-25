@@ -20,25 +20,30 @@ from pipeline.retry import retry_with_backoff
 log = logging.getLogger(__name__)
 
 _RETRY_BASE_DELAY = 2  # seconds
+_MAX_IMAGE_SIZE = 50 * 1024 * 1024  # 50 MB
 
 
 # ---------------------------------------------------------------------------
 # Error hierarchy (mirrors llm.py pattern)
 # ---------------------------------------------------------------------------
 
+
 class GeminiError(Exception):
     """Retryable image generation error."""
+
     pass
 
 
 class GeminiQuotaError(GeminiError):
     """Non-retryable — credits/quota exhausted."""
+
     pass
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _slugify(name: str) -> str:
     """Convert a place name to a filesystem-safe slug."""
@@ -58,6 +63,7 @@ def _encode_image_file(path: Path) -> str:
 # ---------------------------------------------------------------------------
 # Core generation function
 # ---------------------------------------------------------------------------
+
 
 def generate_image(
     prompt: str,
@@ -93,10 +99,12 @@ def generate_image(
     if reference_images:
         content_parts: list[dict] = []
         for img_path in reference_images:
-            content_parts.append({
-                "type": "image_url",
-                "image_url": {"url": _encode_image_file(Path(img_path))},
-            })
+            content_parts.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": _encode_image_file(Path(img_path))},
+                }
+            )
         content_parts.append({"type": "text", "text": prompt})
         messages = [{"role": "user", "content": content_parts}]
     else:
@@ -128,26 +136,18 @@ def generate_image(
         resp.raise_for_status()
         data = resp.json()
 
-        images = (
-            data.get("choices", [{}])[0]
-            .get("message", {})
-            .get("images", [])
-        )
+        images = data.get("choices", [{}])[0].get("message", {}).get("images", [])
 
         if not images:
-            raise GeminiError(
-                "Content filtered or blocked: no images in response"
-            )
+            raise GeminiError("Content filtered or blocked: no images in response")
 
         image_url = images[0].get("image_url", {}).get("url", "")
         if not image_url:
-            raise GeminiError(
-                "Content filtered or blocked: empty image URL in response"
-            )
+            raise GeminiError("Content filtered or blocked: empty image URL in response")
 
         prefix = "data:image/png;base64,"
         if image_url.startswith(prefix):
-            b64_data = image_url[len(prefix):]
+            b64_data = image_url[len(prefix) :]
         elif ";base64," in image_url:
             b64_data = image_url.split(";base64,", 1)[1]
         else:
@@ -155,10 +155,9 @@ def generate_image(
 
         image_bytes = base64.b64decode(b64_data)
 
-        MAX_IMAGE_SIZE = 50 * 1024 * 1024  # 50 MB
-        if len(image_bytes) > MAX_IMAGE_SIZE:
+        if len(image_bytes) > _MAX_IMAGE_SIZE:
             raise GeminiError(f"Decoded image too large: {len(image_bytes)} bytes")
-        if not image_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+        if not image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
             raise GeminiError("Decoded data is not a valid PNG image")
 
         dest = Path(output_path)
@@ -178,9 +177,7 @@ def generate_image(
     except (GeminiQuotaError, GeminiError):
         raise
     except Exception as e:
-        raise GeminiError(
-            f"Image generation failed after {GEMINI_MAX_RETRIES} retries: {e}"
-        ) from e
+        raise GeminiError(f"Image generation failed after {GEMINI_MAX_RETRIES} retries: {e}") from e
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +221,6 @@ def generate_slideshow_images(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     n_places = len(places)
-    total_slides = n_places + 2  # hook + locations + CTA
     prompts: dict[str, str] = {}
     generated = 0
     skipped = 0
@@ -324,7 +320,9 @@ def generate_slideshow_images(
     }
     log.info(
         "Image generation complete: %d generated, %d skipped, %d failed",
-        generated, skipped, failed,
+        generated,
+        skipped,
+        failed,
     )
     return result
 
@@ -339,5 +337,3 @@ _MIN_FILE_SIZE = 10 * 1024  # 10 KB
 def _should_skip(slide_path: Path) -> bool:
     """Return True if the slide image already exists and is large enough."""
     return slide_path.exists() and slide_path.stat().st_size > _MIN_FILE_SIZE
-
-

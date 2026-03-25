@@ -1,21 +1,25 @@
 """Tests for virality scoring and fuzzy dedup logic."""
 
 import math
-import sqlite3
 
 import pytest
 
-from pipeline import db
-from pipeline.scorer import _normalize_name, _find_candidate_pairs, _build_merge_groups, _score_places
-
+from pipeline.scorer import (
+    _build_merge_groups,
+    _find_candidate_pairs,
+    _normalize_name,
+    _score_places,
+)
 
 # ---------------------------------------------------------------------------
 # Virality score tests
 # ---------------------------------------------------------------------------
 
+
 class TestViralityScore:
-    def _make_post(self, conn, city_id, post_id, likes=0, comments=0,
-                   shares=0, saves=0, views=1000):
+    def _make_post(
+        self, conn, city_id, post_id, likes=0, comments=0, shares=0, saves=0, views=1000
+    ):
         """Insert a raw post and return its row id."""
         cur = conn.execute(
             """INSERT INTO raw_posts
@@ -45,14 +49,16 @@ class TestViralityScore:
     def test_basic_score_calculation(self, conn, city_id):
         """Score = sum(engagement_rate) * log(num_posts + 1)."""
         # Post with 100 likes, 10 comments, 5 shares, 2 saves, 10000 views
-        pid = self._make_post(conn, city_id, "p1",
-                              likes=100, comments=10, shares=5, saves=2, views=10000)
+        pid = self._make_post(
+            conn, city_id, "p1", likes=100, comments=10, shares=5, saves=2, views=10000
+        )
         place_id = self._make_place(conn, city_id, "Test Place", [pid])
 
         _score_places(conn, city_id)
 
-        place = conn.execute("SELECT virality_score FROM places WHERE id = ?",
-                             (place_id,)).fetchone()
+        place = conn.execute(
+            "SELECT virality_score FROM places WHERE id = ?", (place_id,)
+        ).fetchone()
 
         # engagement = 2*5 + 5*4 + 10*2 + 100*1 = 10+20+20+100 = 150
         # rate = 150 / 10000 = 0.015
@@ -69,8 +75,9 @@ class TestViralityScore:
 
         _score_places(conn, city_id)
 
-        place = conn.execute("SELECT virality_score FROM places WHERE id = ?",
-                             (place_id,)).fetchone()
+        place = conn.execute(
+            "SELECT virality_score FROM places WHERE id = ?", (place_id,)
+        ).fetchone()
 
         # post1: engagement = 100*1 = 100, rate = 100/1000 = 0.1
         # post2: engagement = 200*1 = 200, rate = 200/1000 = 0.2
@@ -86,8 +93,9 @@ class TestViralityScore:
 
         _score_places(conn, city_id)
 
-        place = conn.execute("SELECT virality_score FROM places WHERE id = ?",
-                             (place_id,)).fetchone()
+        place = conn.execute(
+            "SELECT virality_score FROM places WHERE id = ?", (place_id,)
+        ).fetchone()
         # engagement = 50, rate = 50/1 = 50, mention_bonus = log(2)
         expected = round(50.0 * math.log(2), 4)
         assert place["virality_score"] == expected
@@ -103,8 +111,9 @@ class TestViralityScore:
 
         _score_places(conn, city_id)
 
-        place = conn.execute("SELECT virality_score FROM places WHERE id = ?",
-                             (place_id,)).fetchone()
+        place = conn.execute(
+            "SELECT virality_score FROM places WHERE id = ?", (place_id,)
+        ).fetchone()
         assert place["virality_score"] == 0.0
 
     def test_saves_weighted_highest(self, conn, city_id):
@@ -117,10 +126,12 @@ class TestViralityScore:
 
         _score_places(conn, city_id)
 
-        s_saves = conn.execute("SELECT virality_score FROM places WHERE id = ?",
-                               (place_saves,)).fetchone()["virality_score"]
-        s_likes = conn.execute("SELECT virality_score FROM places WHERE id = ?",
-                               (place_likes,)).fetchone()["virality_score"]
+        s_saves = conn.execute(
+            "SELECT virality_score FROM places WHERE id = ?", (place_saves,)
+        ).fetchone()["virality_score"]
+        s_likes = conn.execute(
+            "SELECT virality_score FROM places WHERE id = ?", (place_likes,)
+        ).fetchone()["virality_score"]
 
         assert s_saves > s_likes
         assert s_saves / s_likes == pytest.approx(5.0, rel=0.01)
@@ -129,6 +140,7 @@ class TestViralityScore:
 # ---------------------------------------------------------------------------
 # Normalization tests
 # ---------------------------------------------------------------------------
+
 
 class TestNormalization:
     def test_lowercase(self):
@@ -148,12 +160,21 @@ class TestNormalization:
 # Fuzzy dedup candidate detection tests
 # ---------------------------------------------------------------------------
 
+
 class TestFuzzyDedupCandidates:
     def _make_fake_place(self, id: int, name: str):
         """Create a dict that looks like a sqlite3.Row with id and name."""
-        return {"id": id, "name": name, "mention_count": 1, "type": "restaurant",
-                "virality_score": 0.0, "is_tourist_trap": False, "sample_caption": None,
-                "city_id": 1, "created_at": None}
+        return {
+            "id": id,
+            "name": name,
+            "mention_count": 1,
+            "type": "restaurant",
+            "virality_score": 0.0,
+            "is_tourist_trap": False,
+            "sample_caption": None,
+            "city_id": 1,
+            "created_at": None,
+        }
 
     def test_exact_match(self):
         places = [self._make_fake_place(1, "Mikla"), self._make_fake_place(2, "Mikla")]
@@ -161,14 +182,18 @@ class TestFuzzyDedupCandidates:
         assert (1, 2) in pairs
 
     def test_near_match(self):
-        places = [self._make_fake_place(1, "Mikla Restaurant"),
-                  self._make_fake_place(2, "Mikla restaurant")]
+        places = [
+            self._make_fake_place(1, "Mikla Restaurant"),
+            self._make_fake_place(2, "Mikla restaurant"),
+        ]
         pairs = _find_candidate_pairs(places)
         assert (1, 2) in pairs
 
     def test_containment_match(self):
-        places = [self._make_fake_place(1, "Karakoy"),
-                  self._make_fake_place(2, "Karakoy Lokantasi")]
+        places = [
+            self._make_fake_place(1, "Karakoy"),
+            self._make_fake_place(2, "Karakoy Lokantasi"),
+        ]
         pairs = _find_candidate_pairs(places)
         assert (1, 2) in pairs
 
@@ -185,8 +210,10 @@ class TestFuzzyDedupCandidates:
         assert len(pairs) == 0
 
     def test_completely_different_names(self):
-        places = [self._make_fake_place(1, "Mikla Restaurant"),
-                  self._make_fake_place(2, "Blue Mosque")]
+        places = [
+            self._make_fake_place(1, "Mikla Restaurant"),
+            self._make_fake_place(2, "Blue Mosque"),
+        ]
         pairs = _find_candidate_pairs(places)
         assert len(pairs) == 0
 
@@ -194,6 +221,7 @@ class TestFuzzyDedupCandidates:
 # ---------------------------------------------------------------------------
 # Union-find (merge groups) tests
 # ---------------------------------------------------------------------------
+
 
 class TestBuildMergeGroups:
     def test_single_pair(self):

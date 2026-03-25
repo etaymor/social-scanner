@@ -2,23 +2,23 @@
 
 import json
 from pathlib import Path
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
 
 from pipeline.posting import (
-    upload_image,
+    PostingAuthError,
+    PostingError,
     create_tiktok_post,
     post_slideshow,
-    PostingError,
-    PostingAuthError,
+    upload_image,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_slide_files(tmp_path: Path, count: int = 3) -> list[Path]:
     """Create dummy slide_N.png files and return them sorted."""
@@ -51,6 +51,7 @@ def _ok_post_response(post_id: str = "post-abc123") -> MagicMock:
 # ---------------------------------------------------------------------------
 # upload_image
 # ---------------------------------------------------------------------------
+
 
 class TestUploadImage:
     @patch("pipeline.posting.requests.post")
@@ -101,9 +102,7 @@ class TestUploadImage:
 
         fail_resp = MagicMock()
         fail_resp.status_code = 500
-        fail_resp.raise_for_status = MagicMock(
-            side_effect=requests.HTTPError("Server error")
-        )
+        fail_resp.raise_for_status = MagicMock(side_effect=requests.HTTPError("Server error"))
 
         mock_post.side_effect = [fail_resp, _ok_upload_response(1)]
 
@@ -120,9 +119,7 @@ class TestUploadImage:
 
         fail_resp = MagicMock()
         fail_resp.status_code = 502
-        fail_resp.raise_for_status = MagicMock(
-            side_effect=requests.HTTPError("Server error")
-        )
+        fail_resp.raise_for_status = MagicMock(side_effect=requests.HTTPError("Server error"))
 
         mock_post.return_value = fail_resp
 
@@ -148,6 +145,7 @@ class TestUploadImage:
 # ---------------------------------------------------------------------------
 # create_tiktok_post
 # ---------------------------------------------------------------------------
+
 
 class TestCreateTiktokPost:
     @patch("pipeline.posting.requests.post")
@@ -184,9 +182,7 @@ class TestCreateTiktokPost:
     def test_retries_on_5xx(self, mock_post, mock_sleep):
         fail_resp = MagicMock()
         fail_resp.status_code = 503
-        fail_resp.raise_for_status = MagicMock(
-            side_effect=requests.HTTPError("Server error")
-        )
+        fail_resp.raise_for_status = MagicMock(side_effect=requests.HTTPError("Server error"))
 
         mock_post.side_effect = [fail_resp, _ok_post_response("post-ok")]
 
@@ -199,6 +195,7 @@ class TestCreateTiktokPost:
 # post_slideshow (orchestrator)
 # ---------------------------------------------------------------------------
 
+
 @patch("pipeline.posting.config")
 class TestPostSlideshow:
     def _setup_config(self, mock_config):
@@ -209,15 +206,12 @@ class TestPostSlideshow:
 
     @patch("pipeline.posting.create_tiktok_post")
     @patch("pipeline.posting.upload_image")
-    def test_uploads_correct_number_in_order(
-        self, mock_upload, mock_create, mock_config, tmp_path
-    ):
+    def test_uploads_correct_number_in_order(self, mock_upload, mock_create, mock_config, tmp_path):
         self._setup_config(mock_config)
         _make_slide_files(tmp_path, count=4)
 
         mock_upload.side_effect = [
-            {"id": f"img-{i}", "path": f"/uploads/img-{i}.png"}
-            for i in range(1, 5)
+            {"id": f"img-{i}", "path": f"/uploads/img-{i}.png"} for i in range(1, 5)
         ]
         mock_create.return_value = "post-123"
 
@@ -254,9 +248,7 @@ class TestPostSlideshow:
 
     @patch("pipeline.posting.create_tiktok_post")
     @patch("pipeline.posting.upload_image")
-    def test_saves_post_meta_json(
-        self, mock_upload, mock_create, mock_config, tmp_path
-    ):
+    def test_saves_post_meta_json(self, mock_upload, mock_create, mock_config, tmp_path):
         self._setup_config(mock_config)
         _make_slide_files(tmp_path, count=1)
 
@@ -277,9 +269,7 @@ class TestPostSlideshow:
 
     @patch("pipeline.posting.create_tiktok_post")
     @patch("pipeline.posting.upload_image")
-    def test_upload_failure_propagates(
-        self, mock_upload, mock_create, mock_config, tmp_path
-    ):
+    def test_upload_failure_propagates(self, mock_upload, mock_create, mock_config, tmp_path):
         self._setup_config(mock_config)
         _make_slide_files(tmp_path, count=3)
 
@@ -297,9 +287,7 @@ class TestPostSlideshow:
 
     @patch("pipeline.posting.create_tiktok_post")
     @patch("pipeline.posting.upload_image")
-    def test_skips_if_post_meta_exists(
-        self, mock_upload, mock_create, mock_config, tmp_path
-    ):
+    def test_skips_if_post_meta_exists(self, mock_upload, mock_create, mock_config, tmp_path):
         self._setup_config(mock_config)
         _make_slide_files(tmp_path, count=2)
 
@@ -328,8 +316,7 @@ class TestPostSlideshow:
         _make_slide_files(tmp_path, count=3)
 
         mock_upload.side_effect = [
-            {"id": f"img-{i}", "path": f"/uploads/img-{i}.png"}
-            for i in range(1, 4)
+            {"id": f"img-{i}", "path": f"/uploads/img-{i}.png"} for i in range(1, 4)
         ]
         mock_create.return_value = "post-delay"
 

@@ -9,8 +9,9 @@ import logging
 import sqlite3
 
 import config
+
 from .db import insert_hashtags
-from .llm import call_llm_json, LLMError
+from .llm import LLMError, call_llm_json
 
 log = logging.getLogger(__name__)
 
@@ -122,7 +123,9 @@ def generate_hashtags(
     """
     log.info(
         "Generating hashtags for %s (city_id=%d, category=%s)",
-        city_name, city_id, category or "generic",
+        city_name,
+        city_id,
+        category or "generic",
     )
 
     if category and category in config.VALID_CATEGORIES:

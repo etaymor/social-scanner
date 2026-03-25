@@ -4,7 +4,7 @@ import logging
 import math
 import sqlite3
 
-from .llm import call_llm_json, LLMError, sanitize_text
+from .llm import LLMError, call_llm_json, sanitize_text
 
 log = logging.getLogger(__name__)
 
@@ -46,8 +46,7 @@ def _build_place_list(places: list[sqlite3.Row]) -> str:
         sample = sanitize_text(place["sample_caption"] or "", max_length=200)
         caption_part = f', sample caption: "{sample}"' if sample else ""
         lines.append(
-            f"- ID {place['id']}: {name} (type: {place_type}, "
-            f"category: {category}{caption_part})"
+            f"- ID {place['id']}: {name} (type: {place_type}, category: {category}{caption_part})"
         )
     return "\n".join(lines)
 
@@ -85,7 +84,9 @@ def enrich_places(
 
     log.info(
         "Enriching %d/%d places for %s",
-        len(to_enrich), len(places), city_name,
+        len(to_enrich),
+        len(places),
+        city_name,
     )
 
     batch_size = ENRICHMENT_BATCH_SIZE
@@ -99,7 +100,9 @@ def enrich_places(
 
         log.info(
             "Enriching batch %d/%d (%d places)...",
-            batch_num + 1, total_batches, len(batch),
+            batch_num + 1,
+            total_batches,
+            len(batch),
         )
 
         numbered_place_list = _build_place_list(batch)
@@ -113,7 +116,8 @@ def enrich_places(
         except LLMError:
             log.exception(
                 "LLM call failed for enrichment batch %d/%d — skipping",
-                batch_num + 1, total_batches,
+                batch_num + 1,
+                total_batches,
             )
             continue
 
@@ -142,7 +146,8 @@ def enrich_places(
             if not enrichment:
                 log.warning(
                     "No enrichment data returned for place %d (%s) — skipping",
-                    place["id"], place["name"],
+                    place["id"],
+                    place["name"],
                 )
                 continue
 
@@ -156,11 +161,16 @@ def enrich_places(
         total_enriched += batch_enriched
         log.info(
             "Batch %d/%d committed — %d/%d places enriched",
-            batch_num + 1, total_batches, batch_enriched, len(batch),
+            batch_num + 1,
+            total_batches,
+            batch_enriched,
+            len(batch),
         )
 
     log.info(
         "Enrichment complete for %s: %d/%d places enriched",
-        city_name, total_enriched, len(to_enrich),
+        city_name,
+        total_enriched,
+        len(to_enrich),
     )
     return total_enriched

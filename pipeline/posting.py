@@ -3,14 +3,14 @@
 import logging
 import re
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import requests
 
 import config
 from pipeline.retry import retry_with_backoff
-from pipeline.slideshow_types import PostMeta, save_post_meta, load_post_meta
+from pipeline.slideshow_types import PostMeta, load_post_meta, save_post_meta
 
 log = logging.getLogger(__name__)
 
@@ -25,6 +25,7 @@ class PostingError(Exception):
 
 class PostingAuthError(PostingError):
     """Non-retryable auth failure (401/403)."""
+
     pass
 
 
@@ -48,13 +49,9 @@ def upload_image(api_key: str, image_path: str | Path) -> dict:
                 timeout=60,
             )
         if resp.status_code in (401, 403):
-            raise PostingAuthError(
-                f"Upload auth failed (HTTP {resp.status_code})"
-            )
+            raise PostingAuthError(f"Upload auth failed (HTTP {resp.status_code})")
         if 400 <= resp.status_code < 500:
-            raise PostingError(
-                f"Upload failed (HTTP {resp.status_code}): {resp.text}"
-            )
+            raise PostingError(f"Upload failed (HTTP {resp.status_code}): {resp.text}")
         resp.raise_for_status()
         return resp.json()
 
@@ -104,16 +101,15 @@ def create_tiktok_post(
 
     def _do_create():
         resp = requests.post(
-            url, headers=headers, json=payload, timeout=60,
+            url,
+            headers=headers,
+            json=payload,
+            timeout=60,
         )
         if resp.status_code in (401, 403):
-            raise PostingAuthError(
-                f"Post creation auth failed (HTTP {resp.status_code})"
-            )
+            raise PostingAuthError(f"Post creation auth failed (HTTP {resp.status_code})")
         if 400 <= resp.status_code < 500:
-            raise PostingError(
-                f"Post creation failed (HTTP {resp.status_code}): {resp.text}"
-            )
+            raise PostingError(f"Post creation failed (HTTP {resp.status_code}): {resp.text}")
         resp.raise_for_status()
         return resp.json()["id"]
 
@@ -127,9 +123,7 @@ def create_tiktok_post(
     except (PostingAuthError, PostingError):
         raise
     except Exception as e:
-        raise PostingError(
-            f"Post creation failed after {MAX_RETRIES + 1} attempts: {e}"
-        ) from e
+        raise PostingError(f"Post creation failed after {MAX_RETRIES + 1} attempts: {e}") from e
 
 
 def post_slideshow(output_dir: str | Path, caption: str) -> PostMeta:
@@ -148,8 +142,7 @@ def post_slideshow(output_dir: str | Path, caption: str) -> PostMeta:
 
     # Discover slide images sorted numerically (only final overlays, not raw/hook/cta variants)
     slide_files = sorted(
-        (p for p in output_dir.glob("slide_*.png")
-         if re.fullmatch(r"slide_\d+\.png", p.name)),
+        (p for p in output_dir.glob("slide_*.png") if re.fullmatch(r"slide_\d+\.png", p.name)),
         key=lambda p: int(re.search(r"slide_(\d+)", p.stem).group(1)),
     )
     if not slide_files:
@@ -183,7 +176,7 @@ def post_slideshow(output_dir: str | Path, caption: str) -> PostMeta:
     # Save metadata
     meta = PostMeta(
         postiz_post_id=post_id,
-        posted_at=datetime.now(timezone.utc).isoformat(),
+        posted_at=datetime.now(UTC).isoformat(),
         platform="tiktok",
         privacy_level="SELF_ONLY",
     )

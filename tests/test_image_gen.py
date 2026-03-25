@@ -3,8 +3,7 @@
 import base64
 import io
 import json
-from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 from PIL import Image
@@ -12,15 +11,15 @@ from PIL import Image
 from pipeline.image_gen import (
     GeminiError,
     GeminiQuotaError,
+    _slugify,
     generate_image,
     generate_slideshow_images,
-    _slugify,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers — build a tiny valid PNG in base64
 # ---------------------------------------------------------------------------
+
 
 def _make_test_png_b64(width=100, height=100, color="blue"):
     """Create a small valid PNG image and return its base64 string."""
@@ -38,18 +37,22 @@ def _make_mock_response(b64=None, status_code=200, content_text="test"):
     resp.status_code = status_code
     resp.raise_for_status = MagicMock()
     resp.json.return_value = {
-        "choices": [{
-            "message": {
-                "role": "assistant",
-                "content": content_text,
-                "images": [{
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/png;base64,{b64}",
-                    },
-                }],
-            },
-        }],
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": content_text,
+                    "images": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{b64}",
+                            },
+                        }
+                    ],
+                },
+            }
+        ],
     }
     return resp
 
@@ -60,13 +63,15 @@ def _make_blocked_response():
     resp.status_code = 200
     resp.raise_for_status = MagicMock()
     resp.json.return_value = {
-        "choices": [{
-            "message": {
-                "role": "assistant",
-                "content": "I cannot generate that image.",
-                "images": [],
-            },
-        }],
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "I cannot generate that image.",
+                    "images": [],
+                },
+            }
+        ],
     }
     return resp
 
@@ -81,6 +86,7 @@ def _make_402_response():
 def _make_500_response():
     """Build a mock 500 (server error) response."""
     import requests as req
+
     resp = MagicMock()
     resp.status_code = 500
     resp.raise_for_status.side_effect = req.HTTPError("Internal Server Error")
@@ -88,7 +94,10 @@ def _make_500_response():
 
 
 SAMPLE_PLACES = [
-    {"name": "Blue Mosque", "image_prompt": "Majestic blue-tiled mosque interior with domed ceiling"},
+    {
+        "name": "Blue Mosque",
+        "image_prompt": "Majestic blue-tiled mosque interior with domed ceiling",
+    },
     {"name": "Grand Bazaar", "image_prompt": "Colorful covered market with hanging lanterns"},
     {"name": "Galata Tower", "image_prompt": "Medieval stone tower overlooking the Bosphorus"},
 ]
@@ -97,6 +106,7 @@ SAMPLE_PLACES = [
 # ---------------------------------------------------------------------------
 # Test: _slugify
 # ---------------------------------------------------------------------------
+
 
 class TestSlugify:
     def test_basic(self):
@@ -113,9 +123,9 @@ class TestSlugify:
 # Test: generate_image
 # ---------------------------------------------------------------------------
 
+
 @patch("pipeline.image_gen.OPENROUTER_API_KEY", "test-key")
 class TestGenerateImage:
-
     @patch("pipeline.image_gen.requests.post")
     def test_success_saves_png(self, mock_post, tmp_path):
         """Generated image is decoded from base64 and saved as a PNG file."""
@@ -218,16 +228,18 @@ class TestGenerateImage:
 # Test: generate_slideshow_images
 # ---------------------------------------------------------------------------
 
+
 @patch("pipeline.image_gen.OPENROUTER_API_KEY", "test-key")
 class TestGenerateSlideshowImages:
-
     @patch("pipeline.image_gen.requests.post")
     def test_generates_correct_number_of_images(self, mock_post, tmp_path):
         """Hook + N location slides + CTA = N+2 images generated."""
         mock_post.return_value = _make_mock_response()
 
         result = generate_slideshow_images(
-            tmp_path, SAMPLE_PLACES, "Epic hook image prompt",
+            tmp_path,
+            SAMPLE_PLACES,
+            "Epic hook image prompt",
         )
 
         # 3 places → 5 total (1 hook + 3 locations + 1 CTA)
@@ -258,7 +270,9 @@ class TestGenerateSlideshowImages:
         slide2_path.write_bytes(b"\x89PNG" + b"\x00" * 11000)
 
         result = generate_slideshow_images(
-            tmp_path, SAMPLE_PLACES, "hook prompt",
+            tmp_path,
+            SAMPLE_PLACES,
+            "hook prompt",
         )
 
         # 2 skipped (hook + slide_2), 3 generated (slide_3, slide_4, CTA)
@@ -275,7 +289,9 @@ class TestGenerateSlideshowImages:
         hook_path.write_bytes(b"\x89PNG" + b"\x00" * 100)
 
         result = generate_slideshow_images(
-            tmp_path, SAMPLE_PLACES, "hook prompt",
+            tmp_path,
+            SAMPLE_PLACES,
+            "hook prompt",
         )
 
         assert result["generated"] == 5
@@ -291,7 +307,9 @@ class TestGenerateSlideshowImages:
         mock_post.side_effect = [ok_resp, blocked_resp, ok_resp, ok_resp, ok_resp]
 
         result = generate_slideshow_images(
-            tmp_path, SAMPLE_PLACES, "hook prompt",
+            tmp_path,
+            SAMPLE_PLACES,
+            "hook prompt",
         )
 
         assert result["generated"] == 4
@@ -304,7 +322,9 @@ class TestGenerateSlideshowImages:
         mock_post.return_value = _make_blocked_response()
 
         result = generate_slideshow_images(
-            tmp_path, SAMPLE_PLACES, "hook prompt",
+            tmp_path,
+            SAMPLE_PLACES,
+            "hook prompt",
         )
 
         assert result["failed"] == 5
@@ -321,7 +341,9 @@ class TestGenerateSlideshowImages:
 
         with pytest.raises(GeminiQuotaError):
             generate_slideshow_images(
-                tmp_path, SAMPLE_PLACES, "hook prompt",
+                tmp_path,
+                SAMPLE_PLACES,
+                "hook prompt",
             )
 
         # Only 2 API calls made (hook + first location)
@@ -333,7 +355,9 @@ class TestGenerateSlideshowImages:
         mock_post.return_value = _make_mock_response()
 
         generate_slideshow_images(
-            tmp_path, SAMPLE_PLACES, "hook prompt",
+            tmp_path,
+            SAMPLE_PLACES,
+            "hook prompt",
         )
 
         # The last call is the CTA slide
@@ -353,7 +377,9 @@ class TestGenerateSlideshowImages:
         Image.new("RGB", (50, 50), "green").save(template)
 
         generate_slideshow_images(
-            tmp_path, SAMPLE_PLACES, "hook prompt",
+            tmp_path,
+            SAMPLE_PLACES,
+            "hook prompt",
             cta_template_path=template,
         )
 
@@ -370,7 +396,9 @@ class TestGenerateSlideshowImages:
         mock_post.return_value = _make_mock_response()
 
         generate_slideshow_images(
-            tmp_path, SAMPLE_PLACES, "Epic hook image",
+            tmp_path,
+            SAMPLE_PLACES,
+            "Epic hook image",
         )
 
         prompts_path = tmp_path / "prompts.json"
@@ -392,7 +420,9 @@ class TestGenerateSlideshowImages:
         mock_post.return_value = _make_mock_response()
 
         generate_slideshow_images(
-            tmp_path, SAMPLE_PLACES, "hook prompt",
+            tmp_path,
+            SAMPLE_PLACES,
+            "hook prompt",
         )
 
         for png_file in tmp_path.glob("slide_*_raw.png"):
@@ -405,7 +435,9 @@ class TestGenerateSlideshowImages:
         mock_post.return_value = _make_mock_response()
 
         generate_slideshow_images(
-            tmp_path, SAMPLE_PLACES, "hook prompt",
+            tmp_path,
+            SAMPLE_PLACES,
+            "hook prompt",
         )
 
         # Check slide 2 (first location) prompt
@@ -421,7 +453,9 @@ class TestGenerateSlideshowImages:
         mock_post.return_value = _make_mock_response()
 
         result = generate_slideshow_images(
-            tmp_path, [], "hook prompt",
+            tmp_path,
+            [],
+            "hook prompt",
         )
 
         assert result["generated"] == 2  # hook + CTA

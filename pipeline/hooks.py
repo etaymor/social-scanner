@@ -1,10 +1,9 @@
 """Hook generation for slideshow formats (listicle and story)."""
 
-import json
 import logging
 import random
 
-from .llm import call_llm_json, LLMError, sanitize_text
+from .llm import LLMError, call_llm_json, sanitize_text
 
 log = logging.getLogger(__name__)
 
@@ -65,8 +64,7 @@ def _build_listicle_prompt(city_name: str, slide_count: int, category: str | Non
     safe_city = sanitize_text(city_name, max_length=200)
     safe_category = sanitize_text(category, max_length=100) if category else None
     templates_formatted = "\n".join(
-        f"  - {t.format(n=slide_count, city=safe_city)}"
-        for t in HOOK_TEMPLATES["listicle"]
+        f"  - {t.format(n=slide_count, city=safe_city)}" for t in HOOK_TEMPLATES["listicle"]
     )
     parts = [
         f"City: {safe_city}",
@@ -76,8 +74,7 @@ def _build_listicle_prompt(city_name: str, slide_count: int, category: str | Non
     if safe_category:
         parts.append(f"Category: {safe_category}")
     parts.append(
-        "Pick the best template (or customize it) for this city/category. "
-        "Return the JSON object."
+        "Pick the best template (or customize it) for this city/category. Return the JSON object."
     )
     return "\n".join(parts)
 
@@ -169,7 +166,8 @@ def generate_hook(
         if not isinstance(result, dict) or not _validate_hook_result(result):
             log.warning(
                 "LLM returned invalid hook structure for %s (%s); using fallback",
-                city_name, hook_format,
+                city_name,
+                hook_format,
             )
             return fallback_fn(city_name, slide_count, category)
         return {
@@ -180,7 +178,8 @@ def generate_hook(
     except LLMError:
         log.warning(
             "LLM call failed for hook generation (%s, %s); using fallback",
-            city_name, hook_format,
+            city_name,
+            hook_format,
             exc_info=True,
         )
         return fallback_fn(city_name, slide_count, category)

@@ -3,31 +3,33 @@
 import json
 from unittest.mock import patch
 
-import pytest
-
-from pipeline.hooks import generate_hook, HOOK_TEMPLATES, _IMAGE_PROMPT_TEMPLATE
+from pipeline.hooks import generate_hook
 from pipeline.llm import LLMError
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_llm_response(hook_text: str, city: str, caption: str | None = None) -> str:
     """Build a JSON string mimicking a successful LLM response."""
-    return json.dumps({
-        "hook_text": hook_text,
-        "hook_image_prompt": f"A stunning establishing shot of {city}, cinematic",
-        "caption": caption or (
-            f"{city} has amazing hidden spots — I found these on Atlasi "
-            f"#travel #hiddengems #atlasi"
-        ),
-    })
+    return json.dumps(
+        {
+            "hook_text": hook_text,
+            "hook_image_prompt": f"A stunning establishing shot of {city}, cinematic",
+            "caption": caption
+            or (
+                f"{city} has amazing hidden spots — I found these on Atlasi "
+                f"#travel #hiddengems #atlasi"
+            ),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
 # Listicle format
 # ---------------------------------------------------------------------------
+
 
 class TestListicleHook:
     @patch("pipeline.hooks.call_llm_json")
@@ -110,6 +112,7 @@ class TestListicleHook:
 # Story format
 # ---------------------------------------------------------------------------
 
+
 class TestStoryHook:
     @patch("pipeline.hooks.call_llm_json")
     def test_story_hook_returns_all_three_fields(self, mock_llm):
@@ -176,6 +179,7 @@ class TestStoryHook:
 # Fallback on LLM failure
 # ---------------------------------------------------------------------------
 
+
 class TestFallback:
     @patch("pipeline.hooks.call_llm_json", side_effect=LLMError("API down"))
     def test_listicle_fallback_does_not_raise(self, mock_llm):
@@ -240,6 +244,7 @@ class TestFallback:
 # ---------------------------------------------------------------------------
 # Invalid LLM response triggers fallback
 # ---------------------------------------------------------------------------
+
 
 class TestInvalidLLMResponse:
     @patch("pipeline.hooks.call_llm_json")

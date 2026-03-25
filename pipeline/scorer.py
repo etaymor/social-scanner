@@ -3,11 +3,14 @@
 import logging
 import math
 import sqlite3
-from rapidfuzz import fuzz, process as rfprocess
+
+from rapidfuzz import fuzz
+from rapidfuzz import process as rfprocess
 
 import config
+
 from . import db
-from .llm import call_llm_json, LLMError
+from .llm import LLMError, call_llm_json
 
 log = logging.getLogger(__name__)
 
@@ -15,6 +18,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _normalize_name(name: str) -> str:
     """Lowercase, strip leading 'the ', collapse whitespace."""
@@ -54,6 +58,7 @@ def _build_merge_groups(pairs: list[tuple[int, int]], all_ids: set[int]) -> list
 # Fuzzy dedup
 # ---------------------------------------------------------------------------
 
+
 def _find_candidate_pairs(
     places: list[sqlite3.Row],
 ) -> list[tuple[int, int]]:
@@ -71,7 +76,8 @@ def _find_candidate_pairs(
 
     # Vectorized fuzzy matching via rapidfuzz cdist (C-optimized)
     score_matrix = rfprocess.cdist(
-        names, names,
+        names,
+        names,
         scorer=fuzz.token_sort_ratio,
         score_cutoff=config.DEDUP_SCORE_CUTOFF,
         workers=-1,
@@ -102,17 +108,15 @@ def _ask_llm_to_confirm_groups(
 
     Returns a list of confirmed sub-groups, each being a list of place IDs.
     """
-    numbered = "\n".join(
-        f"  {idx}. {p['name']}" for idx, p in enumerate(group_places)
-    )
+    numbered = "\n".join(f"  {idx}. {p['name']}" for idx, p in enumerate(group_places))
     prompt = (
         f"These place names were found in social media posts about {city_name}.\n"
         f"Some may refer to the same place. Group the ones that are definitely the same place.\n\n"
         f"Places:\n{numbered}\n\n"
-        f"Return ONLY a JSON object with a \"groups\" key containing an array of arrays.\n"
+        f'Return ONLY a JSON object with a "groups" key containing an array of arrays.\n'
         f"Each inner array has the indices (0-based) of places that are the same.\n"
         f"Places that are unique should appear as single-element arrays.\n"
-        f"Example: {{\"groups\": [[0, 2], [1], [3, 4]]}}"
+        f'Example: {{"groups": [[0, 2], [1], [3, 4]]}}'
     )
 
     try:
@@ -195,7 +199,8 @@ def _perform_dedup(
             log.debug(
                 "Merging %s into '%s' (id=%d)",
                 [place_by_id[mid]["name"] for mid in merge_ids],
-                canonical["name"], canonical["id"],
+                canonical["name"],
+                canonical["id"],
             )
 
             db.merge_places(conn, canonical["id"], merge_ids)
@@ -214,6 +219,7 @@ def _perform_dedup(
 # ---------------------------------------------------------------------------
 # Virality scoring
 # ---------------------------------------------------------------------------
+
 
 def _score_places(
     conn: sqlite3.Connection,
@@ -268,7 +274,10 @@ def _score_places(
             updates.append((final_score, pid))
             log.debug(
                 "  %s: score=%.4f (posts=%d, mention_bonus=%.2f)",
-                data["name"], final_score, data["post_count"], mention_bonus,
+                data["name"],
+                final_score,
+                data["post_count"],
+                mention_bonus,
             )
 
     conn.executemany("UPDATE places SET virality_score = ? WHERE id = ?", updates)
@@ -282,6 +291,7 @@ def _score_places(
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
+
 
 def deduplicate_and_score(
     conn: sqlite3.Connection,

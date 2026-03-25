@@ -2,24 +2,21 @@
 """Atlasi Slideshow Generator — CLI entrypoint and orchestrator."""
 
 import argparse
-import json
 import logging
-import os
 import re
 import shutil
-import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
 
-from pipeline import db
 from config import (
     CATEGORIES,
     SLIDESHOW_OUTPUT_DIR,
     VALID_CATEGORIES,
 )
-from pipeline.llm import CreditsExhaustedError
+from pipeline import db
 from pipeline.image_gen import GeminiQuotaError
+from pipeline.llm import CreditsExhaustedError
 from pipeline.slideshow_types import (
     CTASlideText,
     HookSlideText,
@@ -45,18 +42,34 @@ def build_parser() -> argparse.ArgumentParser:
         description="Atlasi Slideshow Generator — create TikTok slideshows from discovered places",
     )
     parser.add_argument("--city", required=True, help="City name to generate slideshow for")
-    parser.add_argument("--category", choices=sorted(VALID_CATEGORIES), default=None,
-                        help="Focus on a specific category (e.g., food_and_drink)")
-    parser.add_argument("--slide-count", type=int, default=8,
-                        help="Number of location slides (4-15, default: 8)")
-    parser.add_argument("--format", dest="hook_format", choices=["listicle", "story"],
-                        default="listicle", help="Hook format (default: listicle)")
-    parser.add_argument("--post", action="store_true",
-                        help="Post to TikTok as draft via Postiz after generation")
-    parser.add_argument("--allow-reuse", action="store_true",
-                        help="Allow reusing places from recent slideshows")
-    parser.add_argument("--cta-template", type=str, default=None,
-                        help="Path to CTA template image (default: docs/Atlasi Ingest 1.PNG)")
+    parser.add_argument(
+        "--category",
+        choices=sorted(VALID_CATEGORIES),
+        default=None,
+        help="Focus on a specific category (e.g., food_and_drink)",
+    )
+    parser.add_argument(
+        "--slide-count", type=int, default=8, help="Number of location slides (4-15, default: 8)"
+    )
+    parser.add_argument(
+        "--format",
+        dest="hook_format",
+        choices=["listicle", "story"],
+        default="listicle",
+        help="Hook format (default: listicle)",
+    )
+    parser.add_argument(
+        "--post", action="store_true", help="Post to TikTok as draft via Postiz after generation"
+    )
+    parser.add_argument(
+        "--allow-reuse", action="store_true", help="Allow reusing places from recent slideshows"
+    )
+    parser.add_argument(
+        "--cta-template",
+        type=str,
+        default=None,
+        help="Path to CTA template image (default: docs/Atlasi Ingest 1.PNG)",
+    )
     parser.add_argument("--verbose", action="store_true", help="Verbose output")
     parser.add_argument("--quiet", action="store_true", help="Minimal output")
     return parser
@@ -97,8 +110,10 @@ def main() -> None:
         city_name = args.city.strip()
         row = conn.execute("SELECT id FROM cities WHERE name = ?", (city_name,)).fetchone()
         if not row:
-            print(f"Error: City '{city_name}' not found in database. Run discover.py first.",
-                  file=sys.stderr)
+            print(
+                f"Error: City '{city_name}' not found in database. Run discover.py first.",
+                file=sys.stderr,
+            )
             sys.exit(1)
         city_id = row["id"]
         log.info("City: %s (id=%d)", city_name, city_id)
@@ -106,7 +121,8 @@ def main() -> None:
         # Step 2/11: Query available places
         log.info("Step 2/11: Querying available places...")
         available = db.get_available_places(
-            conn, city_id,
+            conn,
+            city_id,
             category=args.category,
             allow_reuse=args.allow_reuse,
         )
@@ -123,7 +139,8 @@ def main() -> None:
                 sys.exit(1)
             log.warning(
                 "Only %d places available (requested %d). Adjusting slide count.",
-                len(available), slide_count,
+                len(available),
+                slide_count,
             )
             slide_count = len(available)
 
@@ -135,6 +152,7 @@ def main() -> None:
         # Step 3/11: Enrich places
         log.info("Step 3/11: Enriching places with neighborhood + image prompts...")
         from pipeline.enrichment import enrich_places
+
         enriched_count = enrich_places(conn, selected_places, city_name)
         log.info("Enriched %d places", enriched_count)
 
@@ -149,6 +167,7 @@ def main() -> None:
         # Step 4/11: Generate hook
         log.info("Step 4/11: Generating hook (%s format)...", args.hook_format)
         from pipeline.hooks import generate_hook
+
         hook_result = generate_hook(
             city_name=city_name,
             slide_count=slide_count,
@@ -175,7 +194,7 @@ def main() -> None:
             output_dir = base_dir.parent / f"{base_dir.name}-{seq:03d}"
 
         if not output_dir.resolve().is_relative_to(SLIDESHOW_OUTPUT_DIR.resolve()):
-            print(f"Error: Invalid city name produces unsafe path", file=sys.stderr)
+            print("Error: Invalid city name produces unsafe path", file=sys.stderr)
             sys.exit(1)
 
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -188,10 +207,13 @@ def main() -> None:
         places_for_gen = []
         for p in selected_places:
             pd = dict(p)
-            places_for_gen.append({
-                "name": pd["name"],
-                "image_prompt": pd.get("image_prompt") or f"A beautiful {pd.get('type', 'place')} in {city_name}",
-            })
+            places_for_gen.append(
+                {
+                    "name": pd["name"],
+                    "image_prompt": pd.get("image_prompt")
+                    or f"A beautiful {pd.get('type', 'place')} in {city_name}",
+                }
+            )
 
         cta_template = args.cta_template
         if not cta_template:
@@ -207,7 +229,9 @@ def main() -> None:
         )
         log.info(
             "Images: %d generated, %d skipped, %d failed",
-            img_result["generated"], img_result["skipped"], img_result["failed"],
+            img_result["generated"],
+            img_result["skipped"],
+            img_result["failed"],
         )
         if img_result["failed_slides"]:
             log.warning("Failed slides: %s", img_result["failed_slides"])
@@ -218,11 +242,13 @@ def main() -> None:
         slides.append(HookSlideText(text=hook_text))
         for i, p in enumerate(selected_places, start=1):
             pd = dict(p)
-            slides.append(LocationSlideText(
-                name=pd["name"],
-                neighborhood=pd.get("neighborhood") or "",
-                number=f"{i}/{slide_count}",
-            ))
+            slides.append(
+                LocationSlideText(
+                    name=pd["name"],
+                    neighborhood=pd.get("neighborhood") or "",
+                    number=f"{i}/{slide_count}",
+                )
+            )
         slides.append(CTASlideText(text="Find more hidden gems\non Atlasi"))
 
         texts_path = output_dir / "texts.json"
@@ -233,6 +259,7 @@ def main() -> None:
         log.info("Step 8/11: Adding text overlays...")
         _normalize_raw_filenames(output_dir, slide_count)
         from pipeline.overlay import add_overlays
+
         overlay_count = add_overlays(output_dir)
         log.info("Applied %d overlays", overlay_count)
 
@@ -246,8 +273,11 @@ def main() -> None:
             slide_count=slide_count,
             created_at=datetime.now().isoformat(),
             places=[
-                {"id": dict(p)["id"], "name": dict(p)["name"],
-                 "neighborhood": dict(p).get("neighborhood") or ""}
+                {
+                    "id": dict(p)["id"],
+                    "name": dict(p)["name"],
+                    "neighborhood": dict(p).get("neighborhood") or "",
+                }
                 for p in selected_places
             ],
         )
@@ -258,7 +288,8 @@ def main() -> None:
         # Step 10/11: Record in database
         log.info("Step 10/11: Recording slideshow in database...")
         slideshow_id = db.create_slideshow(
-            conn, city_id,
+            conn,
+            city_id,
             category=args.category,
             hook_format=args.hook_format,
             hook_text=hook_text,
@@ -273,7 +304,8 @@ def main() -> None:
         # Step 11/11: Post to TikTok (optional)
         if args.post:
             log.info("Step 11/11: Posting to TikTok via Postiz...")
-            from pipeline.posting import post_slideshow, PostingError, PostingAuthError
+            from pipeline.posting import PostingAuthError, PostingError, post_slideshow
+
             try:
                 post_meta = post_slideshow(output_dir, caption)
                 db.mark_slideshow_posted(conn, slideshow_id, post_meta.postiz_post_id)
@@ -296,22 +328,22 @@ def main() -> None:
             log.info("Step 11/11: Skipping posting (use --post to post)")
 
         # Summary
-        print(f"\n{'='*50}")
+        print(f"\n{'=' * 50}")
         print(f"  Atlasi Slideshow: {city_name}")
         if args.category:
             print(f"  Category: {CATEGORIES[args.category]['label']}")
         print(f"  Format: {args.hook_format}")
         print(f"  Slides: {slide_count} locations + hook + CTA = {slide_count + 2} total")
-        print(f"{'='*50}\n")
+        print(f"{'=' * 50}\n")
         print(f"  Hook: {hook_text.replace(chr(10), ' | ')}")
         print(f"  Places: {', '.join(dict(p)['name'] for p in selected_places)}")
         print(f"  Output: {output_dir}")
         if img_result["failed_slides"]:
             print(f"  ⚠ Failed slides: {img_result['failed_slides']}")
         if args.post:
-            print(f"  Posted: Yes (add trending music before publishing)")
+            print("  Posted: Yes (add trending music before publishing)")
         else:
-            print(f"  Posted: No (use --post to post to TikTok)")
+            print("  Posted: No (use --post to post to TikTok)")
         print()
 
     except CreditsExhaustedError:

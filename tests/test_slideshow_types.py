@@ -18,10 +18,10 @@ from pipeline.slideshow_types import (
     to_texts_json,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_slides(location_count: int) -> list:
     """Build a valid slide list with the given number of location slides."""
@@ -42,6 +42,7 @@ def _make_slides(location_count: int) -> list:
 # Round-trip: texts.json
 # ---------------------------------------------------------------------------
 
+
 class TestTextsJsonRoundTrip:
     def test_round_trip(self, tmp_path: Path):
         slides = _make_slides(3)
@@ -50,7 +51,7 @@ class TestTextsJsonRoundTrip:
 
         loaded = from_texts_json(path)
         assert len(loaded) == len(slides)
-        for original, restored in zip(slides, loaded):
+        for original, restored in zip(slides, loaded, strict=True):
             assert type(original) is type(restored)
             assert original == restored
 
@@ -69,6 +70,7 @@ class TestTextsJsonRoundTrip:
 # ---------------------------------------------------------------------------
 # Round-trip: post_meta.json
 # ---------------------------------------------------------------------------
+
 
 class TestPostMetaRoundTrip:
     def test_round_trip(self, tmp_path: Path):
@@ -90,6 +92,7 @@ class TestPostMetaRoundTrip:
 # Type discriminator validation
 # ---------------------------------------------------------------------------
 
+
 class TestTypeDiscriminator:
     def test_hook_rejects_wrong_type(self):
         with pytest.raises(ValueError, match="must be 'hook'"):
@@ -107,6 +110,7 @@ class TestTypeDiscriminator:
 # ---------------------------------------------------------------------------
 # Non-Latin characters
 # ---------------------------------------------------------------------------
+
 
 class TestNonLatinCharacters:
     def test_japanese_place_names_round_trip(self, tmp_path: Path):
@@ -148,7 +152,6 @@ class TestNonLatinCharacters:
         path = tmp_path / "meta.json"
         path.write_text(to_meta_json(meta), encoding="utf-8")
 
-        import json
         loaded = json.loads(path.read_text(encoding="utf-8"))
         assert loaded["city"] == "東京"
         assert loaded["places"][0]["name"] == "一蘭 渋谷店"
