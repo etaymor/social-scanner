@@ -175,19 +175,22 @@ def _run_pipeline(seeded_conn, tmp_path, args_list, mock_post=None):
             "caption": "Tokyo hidden gems #tokyo #travel",
         }
     )
-    mock_img_gen = MagicMock(
-        return_value={
-            "generated": 6,
+    def fake_img_gen(output_dir, places, hook_image_prompt, cta_template_path=None):
+        n = len(places) + 2  # hook + locations + CTA
+        return {
+            "generated": n,
             "skipped": 0,
             "failed": 0,
             "failed_slides": [],
         }
-    )
+
+    mock_img_gen = MagicMock(side_effect=fake_img_gen)
 
     def fake_overlay(output_dir):
-        for i in range(1, 7):
+        texts = json.loads((Path(output_dir) / "texts.json").read_text())
+        for i in range(1, len(texts) + 1):
             (Path(output_dir) / f"slide_{i}.png").write_bytes(b"fake overlay")
-        return 6
+        return len(texts)
 
     mock_overlay = MagicMock(side_effect=fake_overlay)
     mock_post_fn = mock_post or MagicMock(

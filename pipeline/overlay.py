@@ -37,8 +37,9 @@ NEIGHBORHOOD_FONT_RATIO = 0.045  # slightly smaller for neighborhood text
 # Font loading
 # ---------------------------------------------------------------------------
 
+_MODULE_DIR = Path(__file__).resolve().parent.parent
 _FONT_PATHS = [
-    "assets/fonts/NotoSansCJK-Bold.ttc",
+    str(_MODULE_DIR / "assets/fonts/NotoSansCJK-Bold.ttc"),
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
     "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
 ]

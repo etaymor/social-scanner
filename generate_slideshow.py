@@ -263,6 +263,26 @@ def main() -> None:
         overlay_count = add_overlays(output_dir)
         log.info("Applied %d overlays", overlay_count)
 
+        # Verify all expected slide files exist before proceeding
+        total_slides = slide_count + 2  # hook + locations + CTA
+        missing_slides = [
+            f"slide_{i}.png"
+            for i in range(1, total_slides + 1)
+            if not (output_dir / f"slide_{i}.png").exists()
+        ]
+        if missing_slides:
+            log.error(
+                "Aborting: %d slide(s) missing after overlay: %s",
+                len(missing_slides),
+                missing_slides,
+            )
+            print(
+                f"\nError: {len(missing_slides)} slide(s) missing: {missing_slides}\n"
+                f"  Partial output saved in: {output_dir}\n",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
         # Step 9/11: Save metadata
         log.info("Step 9/11: Saving metadata...")
         meta = SlideshowMeta(
@@ -302,6 +322,7 @@ def main() -> None:
         log.info("Slideshow recorded (id=%d)", slideshow_id)
 
         # Step 11/11: Post to TikTok (optional)
+        posted = False
         if args.post:
             log.info("Step 11/11: Posting to TikTok via Postiz...")
             from pipeline.posting import PostingAuthError, PostingError, post_slideshow
@@ -310,12 +331,14 @@ def main() -> None:
                 post_meta = post_slideshow(output_dir, caption)
                 db.mark_slideshow_posted(conn, slideshow_id, post_meta.postiz_post_id)
                 log.info("Posted! Postiz ID: %s", post_meta.postiz_post_id)
+                posted = True
             except PostingAuthError as e:
                 log.error("Postiz authentication failed: %s", e)
                 print(
                     "\n  Postiz auth error. Check POSTIZ_API_KEY and POSTIZ_TIKTOK_INTEGRATION_ID.\n",
                     file=sys.stderr,
                 )
+                sys.exit(1)
             except PostingError as e:
                 log.error("Posting failed: %s", e)
                 print(
@@ -324,6 +347,7 @@ def main() -> None:
                     "  You can retry with: --post\n",
                     file=sys.stderr,
                 )
+                sys.exit(1)
         else:
             log.info("Step 11/11: Skipping posting (use --post to post)")
 
@@ -340,7 +364,7 @@ def main() -> None:
         print(f"  Output: {output_dir}")
         if img_result["failed_slides"]:
             print(f"  ⚠ Failed slides: {img_result['failed_slides']}")
-        if args.post:
+        if posted:
             print("  Posted: Yes (add trending music before publishing)")
         else:
             print("  Posted: No (use --post to post to TikTok)")

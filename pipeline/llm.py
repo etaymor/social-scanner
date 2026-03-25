@@ -62,6 +62,10 @@ def call_llm(
             raise CreditsExhaustedError(
                 "OpenRouter credits exhausted (HTTP 402). Add credits and retry."
             )
+        if 400 <= resp.status_code < 500 and resp.status_code != 429:
+            raise LLMError(
+                f"Non-retryable client error (HTTP {resp.status_code}): {resp.text[:200]}"
+            )
         resp.raise_for_status()
         data = resp.json()
         return data["choices"][0]["message"]["content"].strip()
@@ -71,7 +75,7 @@ def call_llm(
             _do_call,
             max_retries=OPENROUTER_MAX_RETRIES,
             base_delay=OPENROUTER_RETRY_BASE_DELAY,
-            non_retryable=(CreditsExhaustedError,),
+            non_retryable=(CreditsExhaustedError, LLMError),
         )
     except CreditsExhaustedError:
         raise

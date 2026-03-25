@@ -134,7 +134,8 @@ def init_db(conn: sqlite3.Connection) -> None:
             slideshow_id INTEGER NOT NULL REFERENCES slideshows(id) ON DELETE CASCADE,
             place_id INTEGER NOT NULL REFERENCES places(id) ON DELETE CASCADE,
             slide_number INTEGER NOT NULL,
-            PRIMARY KEY (slideshow_id, place_id)
+            PRIMARY KEY (slideshow_id, place_id),
+            UNIQUE (slideshow_id, slide_number)
         );
     """)
 
