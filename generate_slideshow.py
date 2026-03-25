@@ -237,6 +237,8 @@ def main() -> None:
             hook_image_prompt=hook_image_prompt,
             cta_template_path=cta_template,
             style=visual_style,
+            city=city_name,
+            date_str=date_str,
         )
         log.info(
             "Images: %d generated, %d skipped, %d failed",

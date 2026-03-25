@@ -220,6 +220,8 @@ def generate_slideshow_images(
     hook_image_prompt: str,
     cta_template_path: Path | None = None,
     style: SlideshowStyle | None = None,
+    city: str = "default",
+    date_str: str | None = None,
 ) -> dict:
     """Generate all slideshow images: hook + location slides + CTA.
 
@@ -232,6 +234,9 @@ def generate_slideshow_images(
             as visual reference when generating the CTA slide.
         style: Visual style dict from :func:`select_slideshow_style`.
             When *None* a default safe style is used.
+        city: City name used to seed deterministic perspective rotation.
+        date_str: Date string (YYYY-MM-DD) used to seed perspective
+            rotation.  Defaults to today when *None*.
 
     Returns:
         Dict with keys ``generated``, ``skipped``, ``failed``, and
@@ -248,11 +253,14 @@ def generate_slideshow_images(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Use provided style or fall back to a default
-    if style is None:
-        from datetime import datetime
+    from datetime import datetime
 
-        style = select_slideshow_style("default", datetime.now().strftime("%Y-%m-%d"))
+    # Use provided style or fall back to a default
+    if date_str is None:
+        date_str = datetime.now().strftime("%Y-%m-%d")
+
+    if style is None:
+        style = select_slideshow_style(city, date_str)
 
     n_places = len(places)
     prompts: dict[str, str] = {}
@@ -262,11 +270,7 @@ def generate_slideshow_images(
     failed_slides: list[int] = []
 
     # Pre-compute per-slide perspectives for location variety
-    perspectives = get_perspectives_for_slides(
-        style["time_of_day"]["name"],
-        style["color_mood"]["name"],
-        n_places,
-    )
+    perspectives = get_perspectives_for_slides(city, date_str, n_places)
 
     # ------------------------------------------------------------------
     # Slide 1: Hook
@@ -382,7 +386,7 @@ def generate_slideshow_images(
 
 
 # ---------------------------------------------------------------------------
-# Resume / override helpers
+# Resume helpers
 # ---------------------------------------------------------------------------
 
 _MIN_FILE_SIZE = 10 * 1024  # 10 KB
