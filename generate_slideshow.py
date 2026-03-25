@@ -2,6 +2,7 @@
 """Atlasi Slideshow Generator — CLI entrypoint and orchestrator."""
 
 import argparse
+import json
 import logging
 import re
 import shutil
@@ -11,6 +12,7 @@ from pathlib import Path
 
 from config import (
     CATEGORIES,
+    CTA_VARIANTS,
     SLIDESHOW_OUTPUT_DIR,
     VALID_CATEGORIES,
 )
@@ -206,6 +208,12 @@ def main() -> None:
         from pipeline.image_styles import select_slideshow_style
 
         visual_style = select_slideshow_style(city_name, date_str)
+        style_json = json.dumps({
+            "time_of_day": visual_style["time_of_day"]["name"],
+            "weather": visual_style["weather"]["name"],
+            "perspective": visual_style["perspective"]["name"],
+            "color_mood": visual_style["color_mood"]["name"],
+        })
         log.info(
             "Visual style: %s + %s + %s + %s",
             visual_style["time_of_day"]["name"],
@@ -262,7 +270,8 @@ def main() -> None:
                     number=f"{i}/{slide_count}",
                 )
             )
-        slides.append(CTASlideText(text="Find more hidden gems\non Atlasi"))
+        cta_text = CTA_VARIANTS[0]
+        slides.append(CTASlideText(text=cta_text))
 
         texts_path = output_dir / "texts.json"
         texts_path.write_text(to_texts_json(slides), encoding="utf-8")
@@ -331,6 +340,7 @@ def main() -> None:
         )
         for i, p in enumerate(selected_places, start=1):
             db.add_slideshow_place(conn, slideshow_id, dict(p)["id"], slide_number=i)
+        db.update_slideshow_metadata(conn, slideshow_id, visual_style_json=style_json, cta_text=cta_text)
         conn.commit()
         log.info("Slideshow recorded (id=%d)", slideshow_id)
 
