@@ -4,8 +4,9 @@ import logging
 import sqlite3
 
 import config
+
 from . import db
-from .llm import call_llm_json, LLMError, sanitize_text
+from .llm import LLMError, call_llm_json, sanitize_text
 
 log = logging.getLogger(__name__)
 

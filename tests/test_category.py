@@ -1,6 +1,5 @@
 """Tests for category-based search filter feature."""
 
-import sqlite3
 from unittest.mock import patch
 
 import pytest
@@ -9,10 +8,10 @@ import config
 from pipeline import db
 from pipeline.extractor import _validate_category
 
-
 # ---------------------------------------------------------------------------
 # _validate_category unit tests
 # ---------------------------------------------------------------------------
+
 
 class TestValidateCategory:
     def test_valid_category_passes_through(self):
@@ -49,6 +48,7 @@ class TestValidateCategory:
 # TYPE_TO_CATEGORY mapping tests
 # ---------------------------------------------------------------------------
 
+
 class TestTypeToCategoryMapping:
     def test_all_expanded_types_have_mapping(self):
         """Every type in VALID_PLACE_TYPES (except 'other') should have a category mapping."""
@@ -83,6 +83,7 @@ class TestTypeToCategoryMapping:
 # Category-aware hashtag generation integration test
 # ---------------------------------------------------------------------------
 
+
 class TestCategoryHashtagGeneration:
     @patch("pipeline.hashtags.call_llm_json")
     def test_category_generates_mixed_hashtags(self, mock_llm, conn, city_id):
@@ -90,6 +91,7 @@ class TestCategoryHashtagGeneration:
         mock_llm.return_value = {"hashtags": [f"tag_cat_{i}" for i in range(15)]}
 
         from pipeline.hashtags import generate_hashtags
+
         tags = generate_hashtags(conn, city_id, "Istanbul", category="nightlife")
 
         # Should have LLM category tags + seed tags + universal
@@ -103,7 +105,8 @@ class TestCategoryHashtagGeneration:
 
         # Hashtags should be stored with category
         rows = conn.execute(
-            "SELECT DISTINCT category FROM hashtags WHERE city_id = ?", (city_id,),
+            "SELECT DISTINCT category FROM hashtags WHERE city_id = ?",
+            (city_id,),
         ).fetchall()
         categories = {r["category"] for r in rows}
         assert categories == {"nightlife"}
@@ -116,14 +119,16 @@ class TestCategoryHashtagGeneration:
         }
 
         from pipeline.hashtags import generate_hashtags
-        tags = generate_hashtags(conn, city_id, "Istanbul")
+
+        generate_hashtags(conn, city_id, "Istanbul")
 
         # Single LLM call
         assert mock_llm.call_count == 1
 
         # Hashtags stored without category
         rows = conn.execute(
-            "SELECT DISTINCT category FROM hashtags WHERE city_id = ?", (city_id,),
+            "SELECT DISTINCT category FROM hashtags WHERE city_id = ?",
+            (city_id,),
         ).fetchall()
         categories = {r["category"] for r in rows}
         assert categories == {None}
@@ -132,6 +137,7 @@ class TestCategoryHashtagGeneration:
 # ---------------------------------------------------------------------------
 # Category-aware extraction integration test
 # ---------------------------------------------------------------------------
+
 
 class TestCategoryExtraction:
     @patch("pipeline.extractor.call_llm_json")
@@ -149,14 +155,13 @@ class TestCategoryExtraction:
             "results": [
                 {
                     "caption_index": 1,
-                    "places": [
-                        {"name": "Sky Bar", "type": "bar", "category": "nightlife"}
-                    ],
+                    "places": [{"name": "Sky Bar", "type": "bar", "category": "nightlife"}],
                 }
             ]
         }
 
         from pipeline.extractor import extract_places
+
         count = extract_places(conn, city_id, "Istanbul")
 
         assert count == 1
@@ -190,6 +195,7 @@ class TestCategoryExtraction:
         }
 
         from pipeline.extractor import extract_places
+
         count = extract_places(conn, city_id, "Istanbul")
 
         assert count == 1
@@ -214,14 +220,13 @@ class TestCategoryExtraction:
             "results": [
                 {
                     "caption_index": 1,
-                    "places": [
-                        {"name": "Petra Cafe", "type": "cafe"}
-                    ],
+                    "places": [{"name": "Petra Cafe", "type": "cafe"}],
                 }
             ]
         }
 
         from pipeline.extractor import extract_places
+
         count = extract_places(conn, city_id, "Istanbul")
 
         assert count == 1
@@ -236,10 +241,12 @@ class TestCategoryExtraction:
 # CLI argument parsing tests
 # ---------------------------------------------------------------------------
 
+
 class TestCLICategory:
     def test_category_argument_accepted(self):
         """--category with valid value should parse successfully via real CLI parser."""
         from discover import build_parser
+
         parser = build_parser()
         args = parser.parse_args(["--city", "Istanbul", "--category", "nightlife"])
         assert args.category == "nightlife"
@@ -247,6 +254,7 @@ class TestCLICategory:
     def test_category_argument_optional(self):
         """--category omitted should default to None via real CLI parser."""
         from discover import build_parser
+
         parser = build_parser()
         args = parser.parse_args(["--city", "Istanbul"])
         assert args.category is None
@@ -254,6 +262,7 @@ class TestCLICategory:
     def test_invalid_category_rejected(self):
         """--category with invalid value should raise error via real CLI parser."""
         from discover import build_parser
+
         parser = build_parser()
         with pytest.raises(SystemExit):
             parser.parse_args(["--city", "Istanbul", "--category", "invalid"])
@@ -263,21 +272,26 @@ class TestCLICategory:
 # Dashboard category filter tests
 # ---------------------------------------------------------------------------
 
+
 class TestDashboardCategoryFilter:
     @pytest.fixture
     def dashboard_client(self, conn, city_id):
         """Flask test client wired to the in-memory test database."""
+
         # Wrap conn so dashboard's conn.close() is a no-op (keeps in-memory db alive)
         class _UnclosableConn:
             def __init__(self, real):
                 self._real = real
+
             def close(self):
                 pass
+
             def __getattr__(self, name):
                 return getattr(self._real, name)
 
         with patch("dashboard.db.get_connection", return_value=_UnclosableConn(conn)):
             from dashboard import app
+
             app.config["TESTING"] = True
             with app.test_client() as client:
                 yield client, city_id
@@ -361,6 +375,7 @@ class TestDashboardCategoryFilter:
 # ---------------------------------------------------------------------------
 # Schema migration tests
 # ---------------------------------------------------------------------------
+
 
 class TestSchemaMigration:
     def test_category_columns_created(self, conn):
@@ -472,7 +487,9 @@ class TestSchemaMigration:
         assert place["type"] == "temple"
         assert place["category"] is None
 
-        hashtag = legacy_conn.execute("SELECT * FROM hashtags WHERE tag = 'istanbulfood'").fetchone()
+        hashtag = legacy_conn.execute(
+            "SELECT * FROM hashtags WHERE tag = 'istanbulfood'"
+        ).fetchone()
         assert hashtag is not None
         assert hashtag["category"] is None
 
@@ -489,6 +506,7 @@ class TestSchemaMigration:
 # Upsert category behavior
 # ---------------------------------------------------------------------------
 
+
 class TestUpsertCategory:
     def test_upsert_stores_category(self, conn, city_id):
         """New place should store category."""
@@ -503,7 +521,8 @@ class TestUpsertCategory:
         conn.commit()
 
         place = conn.execute(
-            "SELECT category FROM places WHERE city_id = ? AND name = 'Mikla'", (city_id,),
+            "SELECT category FROM places WHERE city_id = ? AND name = 'Mikla'",
+            (city_id,),
         ).fetchone()
         assert place["category"] == "food_and_drink"
 
@@ -526,7 +545,8 @@ class TestUpsertCategory:
         conn.commit()
 
         place = conn.execute(
-            "SELECT category FROM places WHERE city_id = ? AND name = 'Mikla'", (city_id,),
+            "SELECT category FROM places WHERE city_id = ? AND name = 'Mikla'",
+            (city_id,),
         ).fetchone()
         assert place["category"] == "nightlife"
 
@@ -549,7 +569,8 @@ class TestUpsertCategory:
         conn.commit()
 
         place = conn.execute(
-            "SELECT category FROM places WHERE city_id = ? AND name = 'Mikla'", (city_id,),
+            "SELECT category FROM places WHERE city_id = ? AND name = 'Mikla'",
+            (city_id,),
         ).fetchone()
         assert place["category"] == "food_and_drink"
 
@@ -557,6 +578,7 @@ class TestUpsertCategory:
 # ---------------------------------------------------------------------------
 # Hashtag category isolation tests
 # ---------------------------------------------------------------------------
+
 
 class TestHashtagCategoryIsolation:
     def test_pending_hashtags_filtered_by_category(self, conn, city_id):
@@ -582,6 +604,7 @@ class TestHashtagCategoryIsolation:
 # Merge preserves canonical category
 # ---------------------------------------------------------------------------
 
+
 class TestMergePreservesCategory:
     def test_merge_keeps_canonical_category(self, conn, city_id):
         """Merging places should preserve the canonical place's category."""
@@ -598,7 +621,9 @@ class TestMergePreservesCategory:
         conn.commit()
 
         place_a = db.upsert_place(conn, city_id, "Sky Bar", "bar", pid1, category="nightlife")
-        place_b = db.upsert_place(conn, city_id, "Sky Bar Rooftop", "bar", pid2, category="food_and_drink")
+        place_b = db.upsert_place(
+            conn, city_id, "Sky Bar Rooftop", "bar", pid2, category="food_and_drink"
+        )
         conn.commit()
 
         # Merge B into A (A is canonical)

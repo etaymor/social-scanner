@@ -1,11 +1,10 @@
 """SQLite database setup, schema, and query helpers."""
 
+import re
 import sqlite3
 from pathlib import Path
 
-import re
-
-from config import DB_PATH
+from config import DB_PATH, PLACE_REUSE_COOLDOWN_DAYS
 
 
 def get_connection(db_path: str | Path | None = None) -> sqlite3.Connection:
@@ -105,18 +104,58 @@ def init_db(conn: sqlite3.Connection) -> None:
             if "duplicate column name" not in str(e):
                 raise
 
+    # Migrations — add neighborhood and image_prompt columns (safe for existing databases)
+    for col, typedef in (
+        ("neighborhood", "TEXT DEFAULT NULL"),
+        ("image_prompt", "TEXT DEFAULT NULL"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE places ADD COLUMN {col} {typedef}")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" not in str(e):
+                raise
+
+    # Slideshow tracking tables
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS slideshows (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city_id INTEGER NOT NULL REFERENCES cities(id) ON DELETE CASCADE,
+            category TEXT,
+            format TEXT NOT NULL CHECK(format IN ('listicle', 'story')),
+            hook_text TEXT NOT NULL,
+            slide_count INTEGER NOT NULL,
+            output_dir TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            posted_at TIMESTAMP,
+            postiz_post_id TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS slideshow_places (
+            slideshow_id INTEGER NOT NULL REFERENCES slideshows(id) ON DELETE CASCADE,
+            place_id INTEGER NOT NULL REFERENCES places(id) ON DELETE CASCADE,
+            slide_number INTEGER NOT NULL,
+            PRIMARY KEY (slideshow_id, place_id),
+            UNIQUE (slideshow_id, slide_number)
+        );
+    """)
+
     # Category-aware composite indexes (must come after category column migration)
     conn.executescript("""
         CREATE INDEX IF NOT EXISTS idx_places_city_category_score
             ON places(city_id, category, virality_score DESC);
         CREATE INDEX IF NOT EXISTS idx_hashtags_city_status_category
             ON hashtags(city_id, scrape_status, category);
+        CREATE INDEX IF NOT EXISTS idx_slideshows_city
+            ON slideshows(city_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_slideshow_places_place
+            ON slideshow_places(place_id);
     """)
 
     conn.commit()
 
 
 # --- City helpers ---
+
 
 def get_or_create_city(conn: sqlite3.Connection, city_name: str) -> int:
     row = conn.execute("SELECT id FROM cities WHERE name = ?", (city_name,)).fetchone()
@@ -134,8 +173,10 @@ def reset_city(conn: sqlite3.Connection, city_id: int) -> None:
 
 # --- Hashtag helpers ---
 
-def insert_hashtags(conn: sqlite3.Connection, city_id: int, tags: list[str],
-                    category: str | None = None) -> None:
+
+def insert_hashtags(
+    conn: sqlite3.Connection, city_id: int, tags: list[str], category: str | None = None
+) -> None:
     for tag in tags:
         for platform in ("tiktok", "instagram"):
             conn.execute(
@@ -145,8 +186,9 @@ def insert_hashtags(conn: sqlite3.Connection, city_id: int, tags: list[str],
     conn.commit()
 
 
-def get_pending_hashtags(conn: sqlite3.Connection, city_id: int,
-                         category: str | None = None) -> list[sqlite3.Row]:
+def get_pending_hashtags(
+    conn: sqlite3.Connection, city_id: int, category: str | None = None
+) -> list[sqlite3.Row]:
     if category:
         return conn.execute(
             "SELECT * FROM hashtags WHERE city_id = ? AND scrape_status = 'pending' AND category = ?",
@@ -168,8 +210,14 @@ def update_hashtag_status(conn: sqlite3.Connection, hashtag_id: int, status: str
 
 # --- Post helpers ---
 
-def insert_post(conn: sqlite3.Connection, city_id: int, platform: str,
-                post_data: dict[str, object], hashtag_id: int) -> int | None:
+
+def insert_post(
+    conn: sqlite3.Connection,
+    city_id: int,
+    platform: str,
+    post_data: dict[str, object],
+    hashtag_id: int,
+) -> int | None:
     """Insert a post. Returns the raw_posts.id or None if duplicate."""
     try:
         cur = conn.execute(
@@ -178,12 +226,18 @@ def insert_post(conn: sqlite3.Connection, city_id: int, platform: str,
                 saves, views, url, author, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                city_id, platform,
-                post_data["post_id"], post_data.get("caption"),
-                post_data.get("likes", 0), post_data.get("comments", 0),
-                post_data.get("shares", 0), post_data.get("saves", 0),
-                post_data.get("views", 0), post_data.get("url"),
-                post_data.get("author"), post_data.get("created_at"),
+                city_id,
+                platform,
+                post_data["post_id"],
+                post_data.get("caption"),
+                post_data.get("likes", 0),
+                post_data.get("comments", 0),
+                post_data.get("shares", 0),
+                post_data.get("saves", 0),
+                post_data.get("views", 0),
+                post_data.get("url"),
+                post_data.get("author"),
+                post_data.get("created_at"),
             ),
         )
         if cur.rowcount == 0:
@@ -206,8 +260,9 @@ def insert_post(conn: sqlite3.Connection, city_id: int, platform: str,
         return None
 
 
-def get_unprocessed_posts(conn: sqlite3.Connection, city_id: int,
-                          batch_size: int) -> list[sqlite3.Row]:
+def get_unprocessed_posts(
+    conn: sqlite3.Connection, city_id: int, batch_size: int
+) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT * FROM raw_posts WHERE city_id = ? AND processed = FALSE LIMIT ?",
         (city_id, batch_size),
@@ -227,9 +282,16 @@ def mark_posts_processed(conn: sqlite3.Connection, post_ids: list[int]) -> None:
 
 # --- Place helpers ---
 
-def upsert_place(conn: sqlite3.Connection, city_id: int, name: str,
-                 place_type: str, post_id: int, sample_caption: str | None = None,
-                 category: str | None = None) -> int:
+
+def upsert_place(
+    conn: sqlite3.Connection,
+    city_id: int,
+    name: str,
+    place_type: str,
+    post_id: int,
+    sample_caption: str | None = None,
+    category: str | None = None,
+) -> int:
     """Insert or update a place, link it to the post. Returns place id."""
     name = re.sub(r"<[^>]+>", "", name)[:200].strip()
     if not name:
@@ -266,9 +328,13 @@ def get_all_places(conn: sqlite3.Connection, city_id: int) -> list[sqlite3.Row]:
     ).fetchall()
 
 
-def get_places_page(conn: sqlite3.Connection, city_id: int,
-                    page: int = 1, per_page: int = 50,
-                    category: str | None = None) -> tuple[list[sqlite3.Row], int]:
+def get_places_page(
+    conn: sqlite3.Connection,
+    city_id: int,
+    page: int = 1,
+    per_page: int = 50,
+    category: str | None = None,
+) -> tuple[list[sqlite3.Row], int]:
     """Return a page of places and total count for pagination."""
     where = "WHERE city_id = ?"
     params: list = [city_id]
@@ -276,7 +342,8 @@ def get_places_page(conn: sqlite3.Connection, city_id: int,
         where += " AND category = ?"
         params.append(category)
     total = conn.execute(
-        f"SELECT COUNT(*) as cnt FROM places {where}", params,
+        f"SELECT COUNT(*) as cnt FROM places {where}",
+        params,
     ).fetchone()["cnt"]
     offset = (page - 1) * per_page
     rows = conn.execute(
@@ -288,7 +355,8 @@ def get_places_page(conn: sqlite3.Connection, city_id: int,
 
 def get_place_post_ids(conn: sqlite3.Connection, place_id: int) -> list[int]:
     rows = conn.execute(
-        "SELECT post_id FROM place_posts WHERE place_id = ?", (place_id,),
+        "SELECT post_id FROM place_posts WHERE place_id = ?",
+        (place_id,),
     ).fetchall()
     return [r["post_id"] for r in rows]
 
@@ -298,19 +366,22 @@ def get_posts_by_ids(conn: sqlite3.Connection, post_ids: list[int]) -> list[sqli
         return []
     placeholders = ",".join("?" * len(post_ids))
     return conn.execute(
-        f"SELECT * FROM raw_posts WHERE id IN ({placeholders})", post_ids,
+        f"SELECT * FROM raw_posts WHERE id IN ({placeholders})",
+        post_ids,
     ).fetchall()
 
 
 def update_virality_score(conn: sqlite3.Connection, place_id: int, score: float) -> None:
     conn.execute(
-        "UPDATE places SET virality_score = ? WHERE id = ?", (score, place_id),
+        "UPDATE places SET virality_score = ? WHERE id = ?",
+        (score, place_id),
     )
 
 
 def update_tourist_trap(conn: sqlite3.Connection, place_id: int, is_trap: bool) -> None:
     conn.execute(
-        "UPDATE places SET is_tourist_trap = ? WHERE id = ?", (is_trap, place_id),
+        "UPDATE places SET is_tourist_trap = ? WHERE id = ?",
+        (is_trap, place_id),
     )
 
 
@@ -325,7 +396,7 @@ def merge_places(conn: sqlite3.Connection, keep_id: int, merge_ids: list[int]) -
         conn.execute(
             f"""INSERT OR IGNORE INTO place_posts (place_id, post_id)
                 SELECT ?, post_id FROM place_posts WHERE place_id IN ({placeholders})""",
-            [keep_id] + merge_ids,
+            [keep_id, *merge_ids],
         )
 
         # Sum up mention counts
@@ -340,24 +411,108 @@ def merge_places(conn: sqlite3.Connection, keep_id: int, merge_ids: list[int]) -
 
         # Delete merged places (cascade deletes their place_posts)
         conn.execute(
-            f"DELETE FROM places WHERE id IN ({placeholders})", merge_ids,
+            f"DELETE FROM places WHERE id IN ({placeholders})",
+            merge_ids,
         )
 
 
 # --- Stats helpers ---
 
+
 def get_city_stats(conn: sqlite3.Connection, city_id: int) -> dict:
     posts = conn.execute(
-        "SELECT COUNT(*) as cnt FROM raw_posts WHERE city_id = ?", (city_id,),
+        "SELECT COUNT(*) as cnt FROM raw_posts WHERE city_id = ?",
+        (city_id,),
     ).fetchone()["cnt"]
     hashtags = conn.execute(
-        "SELECT COUNT(DISTINCT tag) as cnt FROM hashtags WHERE city_id = ?", (city_id,),
+        "SELECT COUNT(DISTINCT tag) as cnt FROM hashtags WHERE city_id = ?",
+        (city_id,),
     ).fetchone()["cnt"]
     places = conn.execute(
-        "SELECT COUNT(*) as cnt FROM places WHERE city_id = ?", (city_id,),
+        "SELECT COUNT(*) as cnt FROM places WHERE city_id = ?",
+        (city_id,),
     ).fetchone()["cnt"]
     traps = conn.execute(
         "SELECT COUNT(*) as cnt FROM places WHERE city_id = ? AND is_tourist_trap = TRUE",
         (city_id,),
     ).fetchone()["cnt"]
     return {"posts": posts, "hashtags": hashtags, "places": places, "tourist_traps": traps}
+
+
+# --- Slideshow helpers ---
+
+
+def create_slideshow(
+    conn: sqlite3.Connection,
+    city_id: int,
+    category: str | None,
+    hook_format: str,
+    hook_text: str,
+    slide_count: int,
+    output_dir: str,
+) -> int:
+    """Insert a new slideshow row and return its id.
+
+    Does NOT commit — the caller should commit after adding all
+    slideshow_places so the entire operation is atomic.
+    """
+    cur = conn.execute(
+        """INSERT INTO slideshows (city_id, category, format, hook_text, slide_count, output_dir)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (city_id, category, hook_format, hook_text, slide_count, output_dir),
+    )
+    return cur.lastrowid
+
+
+def add_slideshow_place(
+    conn: sqlite3.Connection, slideshow_id: int, place_id: int, slide_number: int
+) -> None:
+    """Link a place to a slideshow at a given slide position.
+
+    Does NOT commit — the caller should commit after adding all places.
+    """
+    conn.execute(
+        "INSERT INTO slideshow_places (slideshow_id, place_id, slide_number) VALUES (?, ?, ?)",
+        (slideshow_id, place_id, slide_number),
+    )
+
+
+def get_available_places(
+    conn: sqlite3.Connection, city_id: int, category: str | None = None, allow_reuse: bool = False
+) -> list[sqlite3.Row]:
+    """Return non-tourist-trap places ordered by virality_score DESC.
+
+    If allow_reuse is False, exclude places used in slideshows created within
+    the last PLACE_REUSE_COOLDOWN_DAYS days.  If category is provided, filter
+    by category.
+    """
+    where = "WHERE p.city_id = ? AND p.is_tourist_trap = FALSE"
+    params: list = [city_id]
+
+    if category:
+        where += " AND p.category = ?"
+        params.append(category)
+
+    if not allow_reuse:
+        where += """
+            AND p.id NOT IN (
+                SELECT sp.place_id
+                FROM slideshow_places sp
+                JOIN slideshows s ON s.id = sp.slideshow_id
+                WHERE s.created_at > datetime('now', ?)
+            )"""
+        params.append(f"-{PLACE_REUSE_COOLDOWN_DAYS} days")
+
+    return conn.execute(
+        f"SELECT p.* FROM places p {where} ORDER BY p.virality_score DESC",
+        params,
+    ).fetchall()
+
+
+def mark_slideshow_posted(conn: sqlite3.Connection, slideshow_id: int, postiz_post_id: str) -> None:
+    """Update a slideshow's posted_at timestamp and postiz_post_id."""
+    conn.execute(
+        "UPDATE slideshows SET posted_at = CURRENT_TIMESTAMP, postiz_post_id = ? WHERE id = ?",
+        (postiz_post_id, slideshow_id),
+    )
+    conn.commit()

@@ -5,8 +5,9 @@ import math
 import sqlite3
 
 import config
+
 from . import db
-from .llm import call_llm_json, LLMError
+from .llm import LLMError, call_llm_json
 
 log = logging.getLogger(__name__)
 
@@ -77,7 +78,9 @@ def filter_tourist_traps(
 
     log.info(
         "Filtering %d places for %s in %d batch(es)",
-        len(places), city_name, total_batches,
+        len(places),
+        city_name,
+        total_batches,
     )
 
     for batch_num in range(total_batches):
@@ -87,7 +90,9 @@ def filter_tourist_traps(
 
         log.info(
             "Filtering batch %d/%d (%d places)...",
-            batch_num + 1, total_batches, len(batch),
+            batch_num + 1,
+            total_batches,
+            len(batch),
         )
 
         numbered_place_list = _build_place_list(batch)
@@ -138,5 +143,7 @@ def filter_tourist_traps(
     ).fetchone()["cnt"]
     log.info(
         "Filtering complete for %s: %d/%d places marked as tourist traps",
-        city_name, trap_count, len(places),
+        city_name,
+        trap_count,
+        len(places),
     )

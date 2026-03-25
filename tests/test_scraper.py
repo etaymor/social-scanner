@@ -1,12 +1,10 @@
 """Tests for scraper field mapping and engagement filters."""
 
-import pytest
-
 from pipeline.scraper import (
-    _map_tiktok,
     _map_instagram,
-    _passes_tiktok_filter,
+    _map_tiktok,
     _passes_instagram_filter,
+    _passes_tiktok_filter,
 )
 
 

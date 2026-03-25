@@ -14,15 +14,20 @@ except ImportError:
 
 try:
     import impit
+
     _IMPIT_HTTP_ERROR: type[Exception] | None = impit.HTTPError
 except ImportError:
     _IMPIT_HTTP_ERROR = None
 
 import config
+
 from . import db
 
 _SCRAPE_ERRORS: tuple[type[Exception], ...] = (
-    requests.RequestException, ApifyClientError, KeyError, ValueError,
+    requests.RequestException,
+    ApifyClientError,
+    KeyError,
+    ValueError,
 )
 if _IMPIT_HTTP_ERROR is not None:
     _SCRAPE_ERRORS = (*_SCRAPE_ERRORS, _IMPIT_HTTP_ERROR)
@@ -33,6 +38,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Field mapping helpers
 # ---------------------------------------------------------------------------
+
 
 def _map_tiktok(item: dict) -> dict:
     """Map a raw TikTok Apify result to our canonical post dict."""
@@ -49,8 +55,7 @@ def _map_tiktok(item: dict) -> dict:
         "saves": item.get("collectCount", 0),
         "views": item.get("playCount") or stats.get("playCount", 0),
         "url": (
-            item.get("webVideoUrl")
-            or f"https://www.tiktok.com/@{author_name}/video/{post_id}"
+            item.get("webVideoUrl") or f"https://www.tiktok.com/@{author_name}/video/{post_id}"
         ),
         "author": author_name,
         "created_at": item.get("createTime"),
@@ -77,6 +82,7 @@ def _map_instagram(item: dict) -> dict:
 # Engagement filters
 # ---------------------------------------------------------------------------
 
+
 def _passes_tiktok_filter(post: dict) -> bool:
     """Return True if a TikTok post meets the minimum engagement bar."""
     views = post.get("views") or 0
@@ -94,14 +100,13 @@ def _passes_instagram_filter(post: dict) -> bool:
     likes = post.get("likes") or 0
     if likes < config.MIN_LIKES_INSTAGRAM:
         return False
-    if views > 0 and views < config.MIN_VIEWS_INSTAGRAM:
-        return False
-    return True
+    return not (views > 0 and views < config.MIN_VIEWS_INSTAGRAM)
 
 
 # ---------------------------------------------------------------------------
 # Core scraper
 # ---------------------------------------------------------------------------
+
 
 def _scrape_hashtag(
     client: ApifyClient,
@@ -142,14 +147,18 @@ def _scrape_hashtag(
     if filtered_out:
         log.info(
             "Filtered out %d/%d low-engagement %s posts for #%s",
-            filtered_out, before, platform, tag,
+            filtered_out,
+            before,
+            platform,
+            tag,
         )
 
     return mapped
 
 
-def _scrape_one(client: ApifyClient, platform: str, tag: str,
-                max_posts: int) -> tuple[str, str, list[dict]]:
+def _scrape_one(
+    client: ApifyClient, platform: str, tag: str, max_posts: int
+) -> tuple[str, str, list[dict]]:
     """Scrape a single hashtag (thread-safe). Returns (tag, platform, posts)."""
     posts = _scrape_hashtag(client, platform, tag, max_posts)
     return tag, platform, posts
@@ -176,11 +185,6 @@ def scrape_posts(
     # Mark all as running
     for row in pending:
         db.update_hashtag_status(conn, row["id"], "running")
-
-    # Build lookup for hashtag rows
-    hashtag_lookup: dict[tuple[str, str], sqlite3.Row] = {
-        (row["tag"], row["platform"]): row for row in pending
-    }
 
     total_inserted = 0
     max_workers = min(3, len(pending))
@@ -213,18 +217,26 @@ def scrape_posts(
                 db.update_hashtag_status(conn, hashtag_id, "completed")
                 log.info(
                     "Stored %d posts from #%s (%s) for %s",
-                    inserted, tag, platform, city_name,
+                    inserted,
+                    tag,
+                    platform,
+                    city_name,
                 )
                 total_inserted += inserted
 
             except _SCRAPE_ERRORS:
                 log.exception(
-                    "Failed to scrape #%s (%s) for %s", tag, platform, city_name,
+                    "Failed to scrape #%s (%s) for %s",
+                    tag,
+                    platform,
+                    city_name,
                 )
                 db.update_hashtag_status(conn, hashtag_id, "failed")
 
     log.info(
         "Scraping complete for %s — %d posts stored from %d hashtags",
-        city_name, total_inserted, len(pending),
+        city_name,
+        total_inserted,
+        len(pending),
     )
     return total_inserted

@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -38,6 +39,21 @@ WEIGHT_SAVES = 5.0
 WEIGHT_SHARES = 4.0
 WEIGHT_COMMENTS = 2.0
 WEIGHT_LIKES = 1.0
+
+# Gemini (image generation via OpenRouter)
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "google/gemini-3.1-flash-image-preview")
+GEMINI_MAX_RETRIES = 2
+GEMINI_TIMEOUT = 120  # seconds
+
+# Postiz (TikTok posting)
+POSTIZ_API_KEY = os.getenv("POSTIZ_API_KEY", "")
+POSTIZ_BASE_URL = "https://api.postiz.com/public/v1"
+POSTIZ_TIKTOK_INTEGRATION_ID = os.getenv("POSTIZ_TIKTOK_INTEGRATION_ID", "")
+POSTIZ_UPLOAD_DELAY = 1.5  # seconds between uploads (rate-limit buffer)
+
+# Slideshow generation
+SLIDESHOW_OUTPUT_DIR = Path(os.getenv("SLIDESHOW_OUTPUT_DIR", "slideshows"))
+PLACE_REUSE_COOLDOWN_DAYS = 30
 
 # Database
 DB_PATH = Path(os.getenv("DB_PATH", "places.db"))

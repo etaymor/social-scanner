@@ -5,8 +5,9 @@ import math
 import os
 
 from flask import Flask, jsonify, render_template, request
-from pipeline import db
+
 from config import CATEGORIES, VALID_CATEGORIES
+from pipeline import db
 
 app = Flask(__name__)
 
@@ -41,17 +42,23 @@ def index():
                 city_name = city_row["name"]
                 stats = db.get_city_stats(conn, city_id)
                 places, total_places = db.get_places_page(
-                    conn, city_id, page, per_page,
+                    conn,
+                    city_id,
+                    page,
+                    per_page,
                     category=category_filter or None,
                 )
                 total_pages = math.ceil(total_places / per_page) if total_places else 0
                 place_types = sorted(
-                    r["type"] for r in conn.execute(
-                        "SELECT DISTINCT type FROM places WHERE city_id = ?", (city_id,),
+                    r["type"]
+                    for r in conn.execute(
+                        "SELECT DISTINCT type FROM places WHERE city_id = ?",
+                        (city_id,),
                     ).fetchall()
                 )
                 place_categories = sorted(
-                    r["category"] for r in conn.execute(
+                    r["category"]
+                    for r in conn.execute(
                         "SELECT DISTINCT category FROM places WHERE city_id = ? AND category IS NOT NULL",
                         (city_id,),
                     ).fetchall()
