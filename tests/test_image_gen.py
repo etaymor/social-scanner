@@ -154,7 +154,33 @@ class TestGenerateImage:
         assert payload["modalities"] == ["image", "text"]
         assert payload["image_config"]["aspect_ratio"] == "9:16"
         assert payload["image_config"]["image_size"] == "2K"
+        # User message is the only message (no system prompt passed)
         assert payload["messages"][0]["content"] == "a mountain sunset"
+
+    @patch("pipeline.image_gen.requests.post")
+    def test_system_prompt_prepended(self, mock_post, tmp_path):
+        """System prompt is prepended as a system message when provided."""
+        mock_post.return_value = _make_mock_response()
+        out = tmp_path / "test.png"
+
+        generate_image("a mountain sunset", out, system_prompt="Be photorealistic")
+
+        payload = mock_post.call_args[1]["json"]
+        assert payload["messages"][0]["role"] == "system"
+        assert payload["messages"][0]["content"] == "Be photorealistic"
+        assert payload["messages"][1]["role"] == "user"
+        assert payload["messages"][1]["content"] == "a mountain sunset"
+
+    @patch("pipeline.image_gen.requests.post")
+    def test_no_system_prompt_by_default(self, mock_post, tmp_path):
+        """Without system_prompt, messages start with the user message."""
+        mock_post.return_value = _make_mock_response()
+        out = tmp_path / "test.png"
+
+        generate_image("a sunset", out)
+
+        payload = mock_post.call_args[1]["json"]
+        assert payload["messages"][0]["role"] == "user"
 
     @patch("pipeline.image_gen.requests.post")
     def test_reference_images_encoded(self, mock_post, tmp_path):
@@ -169,7 +195,9 @@ class TestGenerateImage:
         generate_image("based on reference", out, reference_images=[ref_img])
 
         payload = mock_post.call_args[1]["json"]
-        content = payload["messages"][0]["content"]
+        # User message is the last message
+        user_msg = payload["messages"][-1]
+        content = user_msg["content"]
         assert isinstance(content, list)
         assert content[0]["type"] == "image_url"
         assert content[0]["image_url"]["url"].startswith("data:image/png;base64,")
@@ -350,8 +378,8 @@ class TestGenerateSlideshowImages:
         assert mock_post.call_count == 2
 
     @patch("pipeline.image_gen.requests.post")
-    def test_cta_prompt_includes_place_names(self, mock_post, tmp_path):
-        """CTA slide prompt mentions all place names."""
+    def test_cta_prompt_is_travel_flatlay(self, mock_post, tmp_path):
+        """CTA slide uses a travel flat-lay prompt (not fake app UI)."""
         mock_post.return_value = _make_mock_response()
 
         generate_slideshow_images(
@@ -360,12 +388,11 @@ class TestGenerateSlideshowImages:
             "hook prompt",
         )
 
-        # The last call is the CTA slide
+        # The last call is the CTA slide — find the user message
         last_call_payload = mock_post.call_args_list[-1][1]["json"]
-        cta_prompt = last_call_payload["messages"][0]["content"]
-        assert "Blue Mosque" in cta_prompt
-        assert "Grand Bazaar" in cta_prompt
-        assert "Galata Tower" in cta_prompt
+        user_msg = [m for m in last_call_payload["messages"] if m["role"] == "user"][-1]
+        cta_prompt = user_msg["content"]
+        assert "flat-lay" in cta_prompt or "journal" in cta_prompt
 
     @patch("pipeline.image_gen.requests.post")
     def test_cta_with_template_reference(self, mock_post, tmp_path):
@@ -385,7 +412,8 @@ class TestGenerateSlideshowImages:
 
         # The last call (CTA) should have multipart content with image reference
         last_call_payload = mock_post.call_args_list[-1][1]["json"]
-        content = last_call_payload["messages"][0]["content"]
+        user_msg = [m for m in last_call_payload["messages"] if m["role"] == "user"][-1]
+        content = user_msg["content"]
         assert isinstance(content, list)
         assert content[0]["type"] == "image_url"
         assert content[1]["type"] == "text"
@@ -408,7 +436,8 @@ class TestGenerateSlideshowImages:
         # Should have entries for hook, 3 locations, and CTA
         assert len(prompts) == 5
         assert "slide_1_hook" in prompts
-        assert prompts["slide_1_hook"] == "Epic hook image"
+        # Hook prompt now includes the style block appended
+        assert prompts["slide_1_hook"].startswith("Epic hook image.")
 
         # CTA key should exist
         cta_key = "slide_5_cta"
@@ -431,7 +460,7 @@ class TestGenerateSlideshowImages:
 
     @patch("pipeline.image_gen.requests.post")
     def test_location_prompts_have_style_suffix(self, mock_post, tmp_path):
-        """Location slide prompts include the photography style suffix."""
+        """Location slide prompts include the dynamic photography style suffix."""
         mock_post.return_value = _make_mock_response()
 
         generate_slideshow_images(
@@ -440,12 +469,53 @@ class TestGenerateSlideshowImages:
             "hook prompt",
         )
 
-        # Check slide 2 (first location) prompt
+        # Check slide 2 (first location) prompt — find the user message
         slide2_payload = mock_post.call_args_list[1][1]["json"]
-        prompt_text = slide2_payload["messages"][0]["content"]
-        assert "Shot on iPhone 15 Pro" in prompt_text
-        assert "natural lighting" in prompt_text
-        assert "shallow depth of field" in prompt_text
+        user_msg = [m for m in slide2_payload["messages"] if m["role"] == "user"][-1]
+        prompt_text = user_msg["content"]
+        assert "Photorealistic travel photograph" in prompt_text
+        # Should contain composition and negative guidance
+        assert "focal point" in prompt_text
+        assert "No text" in prompt_text
+
+    @patch("pipeline.image_gen.requests.post")
+    def test_system_prompt_sent_for_all_slides(self, mock_post, tmp_path):
+        """Every slide generation includes the IMAGE_SYSTEM_PROMPT."""
+        mock_post.return_value = _make_mock_response()
+
+        generate_slideshow_images(
+            tmp_path,
+            SAMPLE_PLACES,
+            "hook prompt",
+        )
+
+        for call_args in mock_post.call_args_list:
+            payload = call_args[1]["json"]
+            system_msgs = [m for m in payload["messages"] if m["role"] == "system"]
+            assert len(system_msgs) == 1
+            assert "photorealistic" in system_msgs[0]["content"].lower()
+
+    @patch("pipeline.image_gen.requests.post")
+    def test_perspectives_vary_across_location_slides(self, mock_post, tmp_path):
+        """Different location slides get different camera perspectives."""
+        mock_post.return_value = _make_mock_response()
+
+        generate_slideshow_images(
+            tmp_path,
+            SAMPLE_PLACES,
+            "hook prompt",
+        )
+
+        # Extract location slide prompts (calls 1, 2, 3 — indices after hook)
+        location_prompts = []
+        for call_args in mock_post.call_args_list[1:4]:
+            payload = call_args[1]["json"]
+            user_msg = [m for m in payload["messages"] if m["role"] == "user"][-1]
+            location_prompts.append(user_msg["content"])
+
+        # At least 2 of 3 prompts should have different perspective text
+        # (with 6 perspectives and 3 slides, collisions are very unlikely)
+        assert len(set(location_prompts)) >= 2
 
     @patch("pipeline.image_gen.requests.post")
     def test_empty_places_list(self, mock_post, tmp_path):

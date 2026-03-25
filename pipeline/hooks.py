@@ -17,11 +17,33 @@ HOOK_TEMPLATES = {
     ],
 }
 
-_IMAGE_PROMPT_TEMPLATE = (
-    "A stunning establishing shot of {city}, shot on iPhone 15 Pro, "
-    "golden hour lighting, wide-angle street-level perspective, "
-    "cinematic travel photography, no text or watermarks, no people facing camera"
-)
+_FALLBACK_HOOK_PROMPTS = [
+    (
+        "A narrow cobblestone street in the heart of {city} at dusk, warm amber "
+        "light spilling from open doorways onto worn stone, a vintage iron lantern "
+        "in the foreground slightly out of focus framing the view, distant figures "
+        "blurred in motion between historic facades with weathered plaster"
+    ),
+    (
+        "An elevated rooftop view across {city} during the last minutes of daylight, "
+        "the skyline silhouetted against a gradient from deep indigo to warm amber, "
+        "string lights and potted herbs in the foreground creating depth, "
+        "rooftop terraces stretching out below"
+    ),
+    (
+        "A bustling local market in {city} just after sunrise, morning light "
+        "streaming through canvas awnings in golden shafts, fresh produce and "
+        "flowers in vivid colour stacked in the foreground, vendors mid-gesture "
+        "in the middle ground, the geometry of market stall frames creating "
+        "leading lines into the scene"
+    ),
+    (
+        "A quiet side street in {city} after a rain shower, wet pavement reflecting "
+        "warm shop-front lights in long streaks, a bicycle leaning against a stone "
+        "wall in the foreground, laundry lines and balcony plants overhead framing "
+        "a sliver of grey-blue sky"
+    ),
+]
 
 _LISTICLE_SYSTEM = """\
 You are a TikTok content strategist generating hooks for travel slideshows.
@@ -34,7 +56,16 @@ Rules:
 - The hook_text MUST contain literal \\n line breaks so each line has 4-6 words max
 - Keep it punchy — this is a TikTok hook overlay
 - If a category is provided, weave it in naturally (e.g. "5 cafes in Tokyo\\nlocals don't share")
-- The hook_image_prompt should describe a visually striking establishing shot of the city
+- The hook_image_prompt must be a SPECIFIC scene description (60-100 words), not a \
+generic city overview. Describe a single compelling street-level or rooftop moment \
+that makes someone stop scrolling:
+  * A specific street, market, waterfront, or architectural detail — NOT "the skyline"
+  * One dominant colour temperature or light quality
+  * A foreground framing element (archway, hanging lanterns, cafe awning, tree branch)
+  * At least one sensory/atmospheric detail (steam, rain, light rays, crowd blur)
+  * A detail unique to this specific city that could not exist anywhere else
+  * The image should evoke: "I need to be standing RIGHT THERE"
+  * Do NOT use the words "stunning", "beautiful", "breathtaking", or "iPhone"
 - The caption should be conversational, mention "Atlasi" naturally, and end with 3-5 hashtags
 
 Return ONLY a JSON object with these keys:
@@ -52,7 +83,16 @@ Examples:
 Rules:
 - The hook_text MUST contain literal \\n line breaks so each line has 4-6 words max
 - Use the person+conflict pattern adapted for travel discovery
-- The hook_image_prompt should describe a visually striking establishing shot of the city
+- The hook_image_prompt must be a SPECIFIC scene description (60-100 words), not a \
+generic city overview. Describe a single compelling street-level or rooftop moment \
+that makes someone stop scrolling:
+  * A specific street, market, waterfront, or architectural detail — NOT "the skyline"
+  * One dominant colour temperature or light quality
+  * A foreground framing element (archway, hanging lanterns, cafe awning, tree branch)
+  * At least one sensory/atmospheric detail (steam, rain, light rays, crowd blur)
+  * A detail unique to this specific city that could not exist anywhere else
+  * The image should evoke: "I need to be standing RIGHT THERE"
+  * Do NOT use the words "stunning", "beautiful", "breathtaking", or "iPhone"
 - The caption should be conversational, mention "Atlasi" naturally, and end with 3-5 hashtags
 
 Return ONLY a JSON object with these keys:
@@ -98,7 +138,7 @@ def _fallback_listicle(city_name: str, slide_count: int, category: str | None) -
     """Produce a fallback hook dict when the LLM call fails (listicle)."""
     template = random.choice(HOOK_TEMPLATES["listicle"])
     hook_text = template.format(n=slide_count, city=city_name)
-    image_prompt = _IMAGE_PROMPT_TEMPLATE.format(city=city_name)
+    image_prompt = random.choice(_FALLBACK_HOOK_PROMPTS).format(city=city_name)
     city_lower = city_name.lower().replace(" ", "")
     caption = (
         f"{city_name} has the BEST hidden spots — I found these gems using Atlasi "
@@ -115,7 +155,7 @@ def _fallback_listicle(city_name: str, slide_count: int, category: str | None) -
 def _fallback_story(city_name: str, slide_count: int, category: str | None) -> dict:
     """Produce a fallback hook dict when the LLM call fails (story)."""
     hook_text = f"Nobody told me about\nthese spots in {city_name}"
-    image_prompt = _IMAGE_PROMPT_TEMPLATE.format(city=city_name)
+    image_prompt = random.choice(_FALLBACK_HOOK_PROMPTS).format(city=city_name)
     city_lower = city_name.lower().replace(" ", "")
     caption = (
         f"I never expected to find these spots in {city_name} — "

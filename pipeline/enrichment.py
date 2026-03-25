@@ -11,17 +11,44 @@ log = logging.getLogger(__name__)
 ENRICHMENT_BATCH_SIZE = 10
 
 SYSTEM_PROMPT = """\
-You are a travel expert with deep knowledge of neighborhoods, districts, and the \
-visual character of places around the world. You help enrich place data with accurate \
-neighborhood information and vivid visual descriptions."""
+You are a world-class travel photographer and location scout with 20 years of \
+experience shooting for Conde Nast Traveler, National Geographic Traveler, and \
+Monocle. You specialise in capturing the authentic character of places — not the \
+postcard version, but the version a well-connected local would show you.
+
+You help enrich place data with accurate neighborhood information and extremely \
+specific visual descriptions for AI image generation. Your image prompts must read \
+like shooting notes from a creative director — not generic stock photography \
+descriptions."""
 
 USER_PROMPT_TEMPLATE = """\
 For each place listed below in {city_name}, provide:
+
 1. The neighborhood or district within the city where this place is located.
-2. A detailed visual description suitable for AI image generation, describing what \
-this type of place typically looks like in this city. Emphasize natural iPhone \
-photography aesthetics — warm natural lighting, candid perspective, slightly shallow \
-depth of field, authentic atmosphere.
+
+2. A detailed image generation prompt (80-120 words) describing a single \
+breathtaking photograph of this place. Your prompt MUST include ALL of these elements:
+
+   SUBJECT: What specifically is in frame? Not "a restaurant" but "a cramped \
+eight-seat ramen counter with a chef mid-motion ladling broth, steam rising into \
+the overhead pendant light." Be surgically specific about what is visible.
+
+   SENSORY DETAIL: One atmospheric detail that makes the scene feel alive — steam, \
+condensation, morning dew, crumbling plaster, peeling paint, flickering lanterns, \
+wet stone, fabric rippling in wind, smoke from a grill, light catching dust motes.
+
+   DEPTH AND LAYERS: Describe at least three depth planes — what is in the blurred \
+foreground (a plant, a hand on a railing, a cafe table edge, a hanging lantern), \
+what is the sharp midground subject, and what is in the soft background.
+
+   CULTURAL SPECIFICITY: Include one detail unique to {city_name} or this \
+neighborhood — something that could NOT exist in any other city. An architectural \
+detail, a specific material, a type of signage, a local plant species.
+
+   DO NOT include camera settings, device names, or photography terminology like \
+"bokeh" or "f-stop". DO NOT use generic adjectives like "beautiful", "stunning", \
+or "amazing." DO NOT describe the mood — describe the physical scene and let the \
+mood emerge from the details.
 
 Places:
 {numbered_place_list}

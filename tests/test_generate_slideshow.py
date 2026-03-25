@@ -175,7 +175,7 @@ def _run_pipeline(seeded_conn, tmp_path, args_list, mock_post=None):
             "caption": "Tokyo hidden gems #tokyo #travel",
         }
     )
-    def fake_img_gen(output_dir, places, hook_image_prompt, cta_template_path=None):
+    def fake_img_gen(output_dir, places, hook_image_prompt, cta_template_path=None, style=None):
         n = len(places) + 2  # hook + locations + CTA
         return {
             "generated": n,

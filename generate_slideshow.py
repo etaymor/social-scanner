@@ -203,6 +203,16 @@ def main() -> None:
         # Step 6/11: Generate images
         log.info("Step 6/11: Generating images...")
         from pipeline.image_gen import generate_slideshow_images
+        from pipeline.image_styles import select_slideshow_style
+
+        visual_style = select_slideshow_style(city_name, date_str)
+        log.info(
+            "Visual style: %s + %s + %s + %s",
+            visual_style["time_of_day"]["name"],
+            visual_style["weather"]["name"],
+            visual_style["perspective"]["name"],
+            visual_style["color_mood"]["name"],
+        )
 
         places_for_gen = []
         for p in selected_places:
@@ -226,6 +236,7 @@ def main() -> None:
             places=places_for_gen,
             hook_image_prompt=hook_image_prompt,
             cta_template_path=cta_template,
+            style=visual_style,
         )
         log.info(
             "Images: %d generated, %d skipped, %d failed",

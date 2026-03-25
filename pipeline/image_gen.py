@@ -1,12 +1,18 @@
 """Image generation via OpenRouter + Gemini Flash for slideshow slides."""
 
+from __future__ import annotations
+
 import base64
 import json
 import logging
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import requests
+
+if TYPE_CHECKING:
+    from pipeline.image_styles import SlideshowStyle
 
 from config import (
     GEMINI_MAX_RETRIES,
@@ -70,6 +76,7 @@ def generate_image(
     output_path: Path,
     *,
     reference_images: list[Path] | None = None,
+    system_prompt: str | None = None,
 ) -> bool:
     """Call OpenRouter with the Gemini model to generate one image.
 
@@ -78,6 +85,8 @@ def generate_image(
         output_path: Path where the generated PNG will be saved.
         reference_images: Optional list of image file paths to include as
             visual context (base64-encoded in the request).
+        system_prompt: Optional system-level instruction prepended to the
+            conversation to guide the model's overall behaviour.
 
     Returns:
         True on success.
@@ -95,7 +104,11 @@ def generate_image(
         "Content-Type": "application/json",
     }
 
-    # Build message content
+    # Build message list
+    messages: list[dict] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+
     if reference_images:
         content_parts: list[dict] = []
         for img_path in reference_images:
@@ -106,9 +119,9 @@ def generate_image(
                 }
             )
         content_parts.append({"type": "text", "text": prompt})
-        messages = [{"role": "user", "content": content_parts}]
+        messages.append({"role": "user", "content": content_parts})
     else:
-        messages = [{"role": "user", "content": prompt}]
+        messages.append({"role": "user", "content": prompt})
 
     payload = {
         "model": GEMINI_MODEL,
@@ -189,16 +202,15 @@ def generate_image(
 # Slideshow orchestrator
 # ---------------------------------------------------------------------------
 
-_LOCATION_STYLE_SUFFIX = (
-    "Shot on iPhone 15 Pro, natural lighting, shallow depth of field, "
-    "editorial travel photography, no text or watermarks, no people facing camera"
-)
-
-_CTA_PROMPT_TEMPLATE = (
-    "Generate an image of a modern mobile app screen showing a 'Save Place' "
-    "feature. The screen displays a list of saved places including: {place_names}. "
-    "Clean UI design, rounded cards, map pin icons, warm color palette. "
-    "The app name is 'Atlasi'. Mobile screenshot style, 9:16 aspect ratio."
+_CTA_PROMPT = (
+    "A dreamy flat-lay arrangement on a warm wooden surface: a vintage leather "
+    "journal open to a hand-drawn map with colourful pins, a ceramic coffee cup "
+    "with latte art, a phone face-down showing just a hint of a map on its screen, "
+    "dried wildflowers, a boarding pass, and a pair of sunglasses. Warm morning "
+    "light from the upper left casting soft shadows. Muted warm colour palette, "
+    "shallow depth of field on the edges. The overall feeling is cosy travel "
+    "planning on a lazy morning. No readable text, no brand names visible, "
+    "no UI elements."
 )
 
 
@@ -207,6 +219,7 @@ def generate_slideshow_images(
     places: list[dict],
     hook_image_prompt: str,
     cta_template_path: Path | None = None,
+    style: SlideshowStyle | None = None,
 ) -> dict:
     """Generate all slideshow images: hook + location slides + CTA.
 
@@ -217,13 +230,29 @@ def generate_slideshow_images(
         hook_image_prompt: Image generation prompt for the hook slide.
         cta_template_path: Optional path to a CTA template image to use
             as visual reference when generating the CTA slide.
+        style: Visual style dict from :func:`select_slideshow_style`.
+            When *None* a default safe style is used.
 
     Returns:
         Dict with keys ``generated``, ``skipped``, ``failed``, and
         ``failed_slides`` (list of slide numbers that failed).
     """
+    from pipeline.image_styles import (
+        IMAGE_SYSTEM_PROMPT,
+        build_hook_style_block,
+        build_location_style_suffix,
+        get_perspectives_for_slides,
+        select_slideshow_style,
+    )
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Use provided style or fall back to a default
+    if style is None:
+        from datetime import datetime
+
+        style = select_slideshow_style("default", datetime.now().strftime("%Y-%m-%d"))
 
     n_places = len(places)
     prompts: dict[str, str] = {}
@@ -232,11 +261,20 @@ def generate_slideshow_images(
     failed = 0
     failed_slides: list[int] = []
 
+    # Pre-compute per-slide perspectives for location variety
+    perspectives = get_perspectives_for_slides(
+        style["time_of_day"]["name"],
+        style["color_mood"]["name"],
+        n_places,
+    )
+
     # ------------------------------------------------------------------
     # Slide 1: Hook
     # ------------------------------------------------------------------
     hook_path = output_dir / "slide_1_hook_raw.png"
-    prompts["slide_1_hook"] = hook_image_prompt
+    hook_style_block = build_hook_style_block(style)
+    full_hook_prompt = f"{hook_image_prompt}. {hook_style_block}"
+    prompts["slide_1_hook"] = full_hook_prompt
 
     try:
         if _should_skip(hook_path):
@@ -244,7 +282,9 @@ def generate_slideshow_images(
             skipped += 1
         else:
             log.info("Slide 1 (hook): generating...")
-            generate_image(hook_image_prompt, hook_path)
+            generate_image(
+                full_hook_prompt, hook_path, system_prompt=IMAGE_SYSTEM_PROMPT
+            )
             generated += 1
     except GeminiQuotaError:
         raise
@@ -260,7 +300,10 @@ def generate_slideshow_images(
         slide_num = i + 2
         place_name = place.get("name", f"place_{i}")
         raw_prompt = place.get("image_prompt", "")
-        full_prompt = f"{raw_prompt}. {_LOCATION_STYLE_SUFFIX}"
+        location_suffix = build_location_style_suffix(
+            style, perspective_override=perspectives[i]
+        )
+        full_prompt = f"{raw_prompt}. {location_suffix}"
         slide_path = output_dir / f"slide_{slide_num}_raw.png"
         prompts[f"slide_{slide_num}_{_slugify(place_name)}"] = full_prompt
 
@@ -270,7 +313,9 @@ def generate_slideshow_images(
                 skipped += 1
             else:
                 log.info("Slide %d (%s): generating...", slide_num, place_name)
-                generate_image(full_prompt, slide_path)
+                generate_image(
+                    full_prompt, slide_path, system_prompt=IMAGE_SYSTEM_PROMPT
+                )
                 generated += 1
         except GeminiQuotaError:
             raise
@@ -284,8 +329,7 @@ def generate_slideshow_images(
     # ------------------------------------------------------------------
     cta_slide_num = n_places + 2
     cta_path = output_dir / f"slide_{cta_slide_num}_cta_raw.png"
-    place_names = ", ".join(p.get("name", "") for p in places)
-    cta_prompt = _CTA_PROMPT_TEMPLATE.format(place_names=place_names)
+    cta_prompt = _CTA_PROMPT
     prompts[f"slide_{cta_slide_num}_cta"] = cta_prompt
 
     reference_images = None
@@ -298,7 +342,12 @@ def generate_slideshow_images(
             skipped += 1
         else:
             log.info("Slide %d (CTA): generating...", cta_slide_num)
-            generate_image(cta_prompt, cta_path, reference_images=reference_images)
+            generate_image(
+                cta_prompt,
+                cta_path,
+                reference_images=reference_images,
+                system_prompt=IMAGE_SYSTEM_PROMPT,
+            )
             generated += 1
     except GeminiQuotaError:
         raise
