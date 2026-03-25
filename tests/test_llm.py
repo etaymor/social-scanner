@@ -84,7 +84,7 @@ class TestCallLlm:
         with pytest.raises(CreditsExhaustedError):
             call_llm("test")
 
-    @patch("pipeline.llm.time.sleep")
+    @patch("pipeline.retry.time.sleep")
     @patch("pipeline.llm.requests.post")
     def test_retry_on_transient_error(self, mock_post, mock_sleep):
         fail_resp = MagicMock()
@@ -102,12 +102,12 @@ class TestCallLlm:
         assert result == "ok"
         assert mock_post.call_count == 2
 
-    @patch("pipeline.llm.time.sleep")
+    @patch("pipeline.retry.time.sleep")
     @patch("pipeline.llm.requests.post")
-    def test_429_respects_retry_after(self, mock_post, mock_sleep):
+    def test_429_retries(self, mock_post, mock_sleep):
         rate_resp = MagicMock()
         rate_resp.status_code = 429
-        rate_resp.headers = {"retry-after": "5"}
+        rate_resp.raise_for_status.side_effect = requests.HTTPError("Rate limited")
 
         ok_resp = MagicMock()
         ok_resp.status_code = 200
@@ -118,7 +118,7 @@ class TestCallLlm:
         mock_post.side_effect = [rate_resp, ok_resp]
         result = call_llm("test")
         assert result == "ok"
-        mock_sleep.assert_called_with(5)
+        assert mock_post.call_count == 2
 
     @patch("pipeline.llm.requests.post")
     def test_system_message_sent(self, mock_post):

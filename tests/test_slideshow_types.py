@@ -1,12 +1,9 @@
 """Tests for pipeline.slideshow_types — shared data contracts."""
 
 import json
-import sys
 from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.slideshow_types import (
     CTASlideText,
@@ -14,13 +11,11 @@ from pipeline.slideshow_types import (
     LocationSlideText,
     PostMeta,
     SlideshowMeta,
-    from_meta_json,
     from_texts_json,
     load_post_meta,
     save_post_meta,
     to_meta_json,
     to_texts_json,
-    validate_slides,
 )
 
 
@@ -72,33 +67,6 @@ class TestTextsJsonRoundTrip:
 
 
 # ---------------------------------------------------------------------------
-# Round-trip: meta.json
-# ---------------------------------------------------------------------------
-
-class TestMetaJsonRoundTrip:
-    def test_round_trip(self, tmp_path: Path):
-        meta = SlideshowMeta(
-            city="Tokyo",
-            category="food_and_drink",
-            format="listicle",
-            hook_text="Best ramen in Tokyo!",
-            slide_count=8,
-            created_at="2026-03-24T12:00:00Z",
-            places=[
-                {"id": 1, "name": "Ichiran", "neighborhood": "Shibuya"},
-                {"id": 2, "name": "Fuunji", "neighborhood": "Shinjuku"},
-            ],
-        )
-        path = tmp_path / "meta.json"
-        path.write_text(to_meta_json(meta), encoding="utf-8")
-
-        loaded = from_meta_json(path)
-        assert loaded == meta
-        assert loaded.city == "Tokyo"
-        assert loaded.places[0]["name"] == "Ichiran"
-
-
-# ---------------------------------------------------------------------------
 # Round-trip: post_meta.json
 # ---------------------------------------------------------------------------
 
@@ -119,67 +87,21 @@ class TestPostMetaRoundTrip:
 
 
 # ---------------------------------------------------------------------------
-# Validation — rejection cases
+# Type discriminator validation
 # ---------------------------------------------------------------------------
 
-class TestValidationRejects:
-    def test_rejects_empty(self):
-        with pytest.raises(ValueError, match="empty"):
-            validate_slides([])
+class TestTypeDiscriminator:
+    def test_hook_rejects_wrong_type(self):
+        with pytest.raises(ValueError, match="must be 'hook'"):
+            HookSlideText(type="location")
 
-    def test_rejects_wrong_first_type(self):
-        slides = [
-            LocationSlideText(name="X", neighborhood="Y", number="1/1"),
-            CTASlideText(text="Follow!"),
-        ]
-        with pytest.raises(ValueError, match="First slide must be type 'hook'"):
-            validate_slides(slides)
+    def test_location_rejects_wrong_type(self):
+        with pytest.raises(ValueError, match="must be 'location'"):
+            LocationSlideText(type="hook")
 
-    def test_rejects_wrong_last_type(self):
-        slides = [
-            HookSlideText(text="Hook!"),
-            LocationSlideText(name="X", neighborhood="Y", number="1/1"),
-        ]
-        with pytest.raises(ValueError, match="Last slide must be type 'cta'"):
-            validate_slides(slides)
-
-    def test_rejects_non_sequential_numbers(self):
-        slides = [
-            HookSlideText(text="Hook!"),
-            LocationSlideText(name="A", neighborhood="N", number="1/3"),
-            LocationSlideText(name="B", neighborhood="N", number="3/3"),  # skips 2
-            LocationSlideText(name="C", neighborhood="N", number="2/3"),
-            CTASlideText(text="Follow!"),
-        ]
-        with pytest.raises(ValueError, match="expected '2/3'"):
-            validate_slides(slides)
-
-    def test_rejects_wrong_total_in_number(self):
-        slides = [
-            HookSlideText(text="Hook!"),
-            LocationSlideText(name="A", neighborhood="N", number="1/5"),
-            LocationSlideText(name="B", neighborhood="N", number="2/5"),
-            CTASlideText(text="Follow!"),
-        ]
-        with pytest.raises(ValueError, match="expected '1/2'"):
-            validate_slides(slides)
-
-
-# ---------------------------------------------------------------------------
-# Validation — acceptance cases
-# ---------------------------------------------------------------------------
-
-class TestValidationAccepts:
-    @pytest.mark.parametrize("count", [4, 8, 15])
-    def test_accepts_variable_location_counts(self, count: int):
-        """Validates slide sets with 6, 10, 17 total slides (hook + N + cta)."""
-        slides = _make_slides(count)
-        validate_slides(slides)  # should not raise
-
-    def test_accepts_minimal_set(self):
-        """Hook + 1 location + CTA = 3 slides."""
-        slides = _make_slides(1)
-        validate_slides(slides)
+    def test_cta_rejects_wrong_type(self):
+        with pytest.raises(ValueError, match="must be 'cta'"):
+            CTASlideText(type="hook")
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +133,7 @@ class TestNonLatinCharacters:
         assert loaded[2].neighborhood == "新宿区"
         assert loaded[3].text == "フォローしてね！"
 
-    def test_japanese_meta_round_trip(self, tmp_path: Path):
+    def test_japanese_meta_serializes(self, tmp_path: Path):
         meta = SlideshowMeta(
             city="東京",
             category="food_and_drink",
@@ -226,6 +148,7 @@ class TestNonLatinCharacters:
         path = tmp_path / "meta.json"
         path.write_text(to_meta_json(meta), encoding="utf-8")
 
-        loaded = from_meta_json(path)
-        assert loaded.city == "東京"
-        assert loaded.places[0]["name"] == "一蘭 渋谷店"
+        import json
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        assert loaded["city"] == "東京"
+        assert loaded["places"][0]["name"] == "一蘭 渋谷店"

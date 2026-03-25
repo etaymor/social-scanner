@@ -5,6 +5,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -48,8 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Focus on a specific category (e.g., food_and_drink)")
     parser.add_argument("--slide-count", type=int, default=8,
                         help="Number of location slides (4-15, default: 8)")
-    parser.add_argument("--format", choices=["listicle", "story"], default="listicle",
-                        help="Hook format (default: listicle)")
+    parser.add_argument("--format", dest="hook_format", choices=["listicle", "story"],
+                        default="listicle", help="Hook format (default: listicle)")
     parser.add_argument("--post", action="store_true",
                         help="Post to TikTok as draft via Postiz after generation")
     parser.add_argument("--allow-reuse", action="store_true",
@@ -146,14 +147,13 @@ def main() -> None:
         ).fetchall()
 
         # Step 4/11: Generate hook
-        log.info("Step 4/11: Generating hook (%s format)...", args.format)
+        log.info("Step 4/11: Generating hook (%s format)...", args.hook_format)
         from pipeline.hooks import generate_hook
         hook_result = generate_hook(
             city_name=city_name,
             slide_count=slide_count,
-            format=args.format,
+            hook_format=args.hook_format,
             category=args.category,
-            places=[dict(p) for p in selected_places],
         )
         hook_text = hook_result["hook_text"]
         hook_image_prompt = hook_result["hook_image_prompt"]
@@ -164,8 +164,8 @@ def main() -> None:
         log.info("Step 5/11: Creating output directory...")
         date_str = datetime.now().strftime("%Y-%m-%d")
         cat_slug = args.category or "all"
-        city_slug = city_name.lower().replace(" ", "-")
-        base_dir = SLIDESHOW_OUTPUT_DIR / f"{city_slug}-{cat_slug}-{args.format}-{date_str}"
+        city_slug = re.sub(r"[^a-z0-9-]", "", city_name.lower().replace(" ", "-"))
+        base_dir = SLIDESHOW_OUTPUT_DIR / f"{city_slug}-{cat_slug}-{args.hook_format}-{date_str}"
 
         # Find next sequence number
         seq = 1
@@ -173,6 +173,11 @@ def main() -> None:
         while output_dir.exists() and (output_dir / "meta.json").exists():
             seq += 1
             output_dir = base_dir.parent / f"{base_dir.name}-{seq:03d}"
+
+        if not output_dir.resolve().is_relative_to(SLIDESHOW_OUTPUT_DIR.resolve()):
+            print(f"Error: Invalid city name produces unsafe path", file=sys.stderr)
+            sys.exit(1)
+
         output_dir.mkdir(parents=True, exist_ok=True)
         log.info("Output directory: %s", output_dir)
 
@@ -236,7 +241,7 @@ def main() -> None:
         meta = SlideshowMeta(
             city=city_name,
             category=args.category,
-            format=args.format,
+            format=args.hook_format,
             hook_text=hook_text,
             slide_count=slide_count,
             created_at=datetime.now().isoformat(),
@@ -255,7 +260,7 @@ def main() -> None:
         slideshow_id = db.create_slideshow(
             conn, city_id,
             category=args.category,
-            format=args.format,
+            hook_format=args.hook_format,
             hook_text=hook_text,
             slide_count=slide_count,
             output_dir=str(output_dir),
@@ -295,7 +300,7 @@ def main() -> None:
         print(f"  Atlasi Slideshow: {city_name}")
         if args.category:
             print(f"  Category: {CATEGORIES[args.category]['label']}")
-        print(f"  Format: {args.format}")
+        print(f"  Format: {args.hook_format}")
         print(f"  Slides: {slide_count} locations + hook + CTA = {slide_count + 2} total")
         print(f"{'='*50}\n")
         print(f"  Hook: {hook_text.replace(chr(10), ' | ')}")

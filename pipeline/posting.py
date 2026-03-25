@@ -9,6 +9,7 @@ from pathlib import Path
 import requests
 
 import config
+from pipeline.retry import retry_with_backoff
 from pipeline.slideshow_types import PostMeta, save_post_meta, load_post_meta
 
 log = logging.getLogger(__name__)
@@ -27,20 +28,6 @@ class PostingAuthError(PostingError):
     pass
 
 
-def _handle_response(resp: requests.Response, context: str) -> dict:
-    """Check response status and return JSON, raising typed errors."""
-    if resp.status_code in (401, 403):
-        raise PostingAuthError(
-            f"{context}: authentication failed (HTTP {resp.status_code})"
-        )
-    if 400 <= resp.status_code < 500:
-        raise PostingError(
-            f"{context}: client error (HTTP {resp.status_code}): {resp.text}"
-        )
-    resp.raise_for_status()
-    return resp.json()
-
-
 def upload_image(api_key: str, image_path: str | Path) -> dict:
     """Upload an image to Postiz and return the response JSON.
 
@@ -52,52 +39,38 @@ def upload_image(api_key: str, image_path: str | Path) -> dict:
     headers = {"Authorization": f"Bearer {api_key}"}
     image_path = Path(image_path)
 
-    last_error = None
-    for attempt in range(MAX_RETRIES + 1):
-        try:
-            with open(image_path, "rb") as f:
-                resp = requests.post(
-                    url,
-                    headers=headers,
-                    files={"file": (image_path.name, f, "image/png")},
-                    timeout=60,
-                )
+    def _do_upload():
+        with open(image_path, "rb") as f:
+            resp = requests.post(
+                url,
+                headers=headers,
+                files={"file": (image_path.name, f, "image/png")},
+                timeout=60,
+            )
+        if resp.status_code in (401, 403):
+            raise PostingAuthError(
+                f"Upload auth failed (HTTP {resp.status_code})"
+            )
+        if 400 <= resp.status_code < 500:
+            raise PostingError(
+                f"Upload failed (HTTP {resp.status_code}): {resp.text}"
+            )
+        resp.raise_for_status()
+        return resp.json()
 
-            if resp.status_code in (401, 403):
-                raise PostingAuthError(
-                    f"Upload auth failed (HTTP {resp.status_code})"
-                )
-            if 400 <= resp.status_code < 500:
-                raise PostingError(
-                    f"Upload failed (HTTP {resp.status_code}): {resp.text}"
-                )
-
-            # 5xx — retryable
-            if resp.status_code >= 500:
-                raise requests.HTTPError(
-                    f"Server error (HTTP {resp.status_code})", response=resp
-                )
-
-            resp.raise_for_status()
-            return resp.json()
-
-        except PostingAuthError:
-            raise
-        except PostingError:
-            raise
-        except (requests.RequestException, OSError) as e:
-            last_error = e
-            if attempt < MAX_RETRIES:
-                delay = RETRY_BASE_DELAY * (2 ** attempt)
-                log.warning(
-                    "Upload failed (attempt %d/%d): %s. Retrying in %ds...",
-                    attempt + 1, MAX_RETRIES + 1, e, delay,
-                )
-                time.sleep(delay)
-
-    raise PostingError(
-        f"Upload of {image_path} failed after {MAX_RETRIES + 1} attempts: {last_error}"
-    )
+    try:
+        return retry_with_backoff(
+            _do_upload,
+            max_retries=MAX_RETRIES + 1,
+            base_delay=RETRY_BASE_DELAY,
+            non_retryable=(PostingAuthError, PostingError),
+        )
+    except (PostingAuthError, PostingError):
+        raise
+    except Exception as e:
+        raise PostingError(
+            f"Upload of {image_path} failed after {MAX_RETRIES + 1} attempts: {e}"
+        ) from e
 
 
 def create_tiktok_post(
@@ -129,49 +102,34 @@ def create_tiktok_post(
         },
     }
 
-    last_error = None
-    for attempt in range(MAX_RETRIES + 1):
-        try:
-            resp = requests.post(
-                url, headers=headers, json=payload, timeout=60,
+    def _do_create():
+        resp = requests.post(
+            url, headers=headers, json=payload, timeout=60,
+        )
+        if resp.status_code in (401, 403):
+            raise PostingAuthError(
+                f"Post creation auth failed (HTTP {resp.status_code})"
             )
+        if 400 <= resp.status_code < 500:
+            raise PostingError(
+                f"Post creation failed (HTTP {resp.status_code}): {resp.text}"
+            )
+        resp.raise_for_status()
+        return resp.json()["id"]
 
-            if resp.status_code in (401, 403):
-                raise PostingAuthError(
-                    f"Post creation auth failed (HTTP {resp.status_code})"
-                )
-            if 400 <= resp.status_code < 500:
-                raise PostingError(
-                    f"Post creation failed (HTTP {resp.status_code}): {resp.text}"
-                )
-
-            # 5xx — retryable
-            if resp.status_code >= 500:
-                raise requests.HTTPError(
-                    f"Server error (HTTP {resp.status_code})", response=resp
-                )
-
-            resp.raise_for_status()
-            data = resp.json()
-            return data["id"]
-
-        except PostingAuthError:
-            raise
-        except PostingError:
-            raise
-        except (requests.RequestException, KeyError) as e:
-            last_error = e
-            if attempt < MAX_RETRIES:
-                delay = RETRY_BASE_DELAY * (2 ** attempt)
-                log.warning(
-                    "Post creation failed (attempt %d/%d): %s. Retrying in %ds...",
-                    attempt + 1, MAX_RETRIES + 1, e, delay,
-                )
-                time.sleep(delay)
-
-    raise PostingError(
-        f"Post creation failed after {MAX_RETRIES + 1} attempts: {last_error}"
-    )
+    try:
+        return retry_with_backoff(
+            _do_create,
+            max_retries=MAX_RETRIES + 1,
+            base_delay=RETRY_BASE_DELAY,
+            non_retryable=(PostingAuthError, PostingError),
+        )
+    except (PostingAuthError, PostingError):
+        raise
+    except Exception as e:
+        raise PostingError(
+            f"Post creation failed after {MAX_RETRIES + 1} attempts: {e}"
+        ) from e
 
 
 def post_slideshow(output_dir: str | Path, caption: str) -> PostMeta:
@@ -188,9 +146,10 @@ def post_slideshow(output_dir: str | Path, caption: str) -> PostMeta:
         log.info("Post already exists at %s — skipping", post_meta_path)
         return load_post_meta(post_meta_path)
 
-    # Discover slide images sorted numerically
+    # Discover slide images sorted numerically (only final overlays, not raw/hook/cta variants)
     slide_files = sorted(
-        output_dir.glob("slide_*.png"),
+        (p for p in output_dir.glob("slide_*.png")
+         if re.fullmatch(r"slide_\d+\.png", p.name)),
         key=lambda p: int(re.search(r"slide_(\d+)", p.stem).group(1)),
     )
     if not slide_files:

@@ -1,13 +1,9 @@
 """Tests for pipeline.hooks — hook generation for listicle and story formats."""
 
 import json
-import sys
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.hooks import generate_hook, HOOK_TEMPLATES, _IMAGE_PROMPT_TEMPLATE
 from pipeline.llm import LLMError
@@ -41,7 +37,7 @@ class TestListicleHook:
             "hook_image_prompt": "A stunning establishing shot of Tokyo",
             "caption": "Tokyo is unreal — found these on Atlasi #tokyo #atlasi #travel",
         }
-        result = generate_hook("Tokyo", 5, "listicle")
+        result = generate_hook("Tokyo", 5, hook_format="listicle")
         assert "Tokyo" in result["hook_text"]
         assert "5" in result["hook_text"]
 
@@ -52,7 +48,7 @@ class TestListicleHook:
             "hook_image_prompt": "A stunning establishing shot of Tokyo",
             "caption": "Found these on Atlasi #tokyo #atlasi",
         }
-        result = generate_hook("Tokyo", 5, "listicle")
+        result = generate_hook("Tokyo", 5, hook_format="listicle")
         assert "\n" in result["hook_text"]
 
     @patch("pipeline.hooks.call_llm_json")
@@ -62,7 +58,7 @@ class TestListicleHook:
             "hook_image_prompt": "A stunning establishing shot of Paris",
             "caption": "Paris gems via Atlasi #paris #atlasi #travel",
         }
-        result = generate_hook("Paris", 5, "listicle")
+        result = generate_hook("Paris", 5, hook_format="listicle")
         assert "hook_text" in result
         assert "hook_image_prompt" in result
         assert "caption" in result
@@ -78,7 +74,7 @@ class TestListicleHook:
             "hook_image_prompt": "A stunning establishing shot of Rome",
             "caption": "Rome blew my mind — found these on Atlasi #rome #atlasi #travel",
         }
-        result = generate_hook("Rome", 7, "listicle")
+        result = generate_hook("Rome", 7, hook_format="listicle")
         caption_lower = result["caption"].lower()
         assert "atlasi" in caption_lower
         assert "#" in result["caption"]
@@ -90,7 +86,7 @@ class TestListicleHook:
             "hook_image_prompt": "A stunning shot of Tokyo cafe district",
             "caption": "Tokyo cafes via Atlasi #tokyofood #atlasi",
         }
-        generate_hook("Tokyo", 5, "listicle", category="food_and_drink")
+        generate_hook("Tokyo", 5, hook_format="listicle", category="food_and_drink")
 
         # Verify the prompt passed to call_llm_json includes the category
         call_args = mock_llm.call_args
@@ -104,7 +100,7 @@ class TestListicleHook:
             "hook_image_prompt": "Shot of Tokyo",
             "caption": "Atlasi finds #atlasi",
         }
-        generate_hook("Tokyo", 5, "listicle", category=None)
+        generate_hook("Tokyo", 5, hook_format="listicle", category=None)
 
         prompt = mock_llm.call_args[0][0]
         assert "Category:" not in prompt
@@ -122,7 +118,7 @@ class TestStoryHook:
             "hook_image_prompt": "A stunning establishing shot of Tokyo at golden hour",
             "caption": "My mom couldn't believe Tokyo — Atlasi found these #tokyo #atlasi",
         }
-        result = generate_hook("Tokyo", 5, "story")
+        result = generate_hook("Tokyo", 5, hook_format="story")
         assert "hook_text" in result
         assert "hook_image_prompt" in result
         assert "caption" in result
@@ -137,7 +133,7 @@ class TestStoryHook:
             "hook_image_prompt": "A stunning establishing shot of Paris",
             "caption": "Paris like you've never seen — Atlasi #paris #atlasi #travel",
         }
-        result = generate_hook("Paris", 5, "story")
+        result = generate_hook("Paris", 5, hook_format="story")
         assert "\n" in result["hook_text"]
 
     @patch("pipeline.hooks.call_llm_json")
@@ -147,7 +143,7 @@ class TestStoryHook:
             "hook_image_prompt": "Shot of Barcelona",
             "caption": "Found on Atlasi #atlasi",
         }
-        generate_hook("Barcelona", 6, "story")
+        generate_hook("Barcelona", 6, hook_format="story")
 
         call_args = mock_llm.call_args
         system = call_args[1]["system"]
@@ -160,7 +156,7 @@ class TestStoryHook:
             "hook_image_prompt": "Shot of Berlin",
             "caption": "Atlasi nightlife gems #atlasi",
         }
-        generate_hook("Berlin", 4, "story", category="nightlife")
+        generate_hook("Berlin", 4, hook_format="story", category="nightlife")
 
         prompt = mock_llm.call_args[0][0]
         assert "nightlife" in prompt
@@ -172,7 +168,7 @@ class TestStoryHook:
             "hook_image_prompt": "Shot of Lisbon",
             "caption": "Lisbon is incredible — I mapped it all on Atlasi #lisbon #atlasi",
         }
-        result = generate_hook("Lisbon", 5, "story")
+        result = generate_hook("Lisbon", 5, hook_format="story")
         assert "atlasi" in result["caption"].lower()
 
 
@@ -183,13 +179,13 @@ class TestStoryHook:
 class TestFallback:
     @patch("pipeline.hooks.call_llm_json", side_effect=LLMError("API down"))
     def test_listicle_fallback_does_not_raise(self, mock_llm):
-        result = generate_hook("Tokyo", 5, "listicle")
+        result = generate_hook("Tokyo", 5, hook_format="listicle")
         # Should not raise
         assert isinstance(result, dict)
 
     @patch("pipeline.hooks.call_llm_json", side_effect=LLMError("API down"))
     def test_listicle_fallback_returns_all_fields(self, mock_llm):
-        result = generate_hook("Tokyo", 5, "listicle")
+        result = generate_hook("Tokyo", 5, hook_format="listicle")
         assert "hook_text" in result
         assert "hook_image_prompt" in result
         assert "caption" in result
@@ -199,45 +195,45 @@ class TestFallback:
 
     @patch("pipeline.hooks.call_llm_json", side_effect=LLMError("API down"))
     def test_listicle_fallback_contains_city_and_count(self, mock_llm):
-        result = generate_hook("Tokyo", 5, "listicle")
+        result = generate_hook("Tokyo", 5, hook_format="listicle")
         assert "Tokyo" in result["hook_text"]
         assert "5" in result["hook_text"]
 
     @patch("pipeline.hooks.call_llm_json", side_effect=LLMError("API down"))
     def test_listicle_fallback_has_line_breaks(self, mock_llm):
-        result = generate_hook("Tokyo", 5, "listicle")
+        result = generate_hook("Tokyo", 5, hook_format="listicle")
         assert "\n" in result["hook_text"]
 
     @patch("pipeline.hooks.call_llm_json", side_effect=LLMError("API down"))
     def test_listicle_fallback_caption_has_atlasi(self, mock_llm):
-        result = generate_hook("Tokyo", 5, "listicle")
+        result = generate_hook("Tokyo", 5, hook_format="listicle")
         assert "atlasi" in result["caption"].lower()
 
     @patch("pipeline.hooks.call_llm_json", side_effect=LLMError("API down"))
     def test_story_fallback_does_not_raise(self, mock_llm):
-        result = generate_hook("Paris", 5, "story")
+        result = generate_hook("Paris", 5, hook_format="story")
         assert isinstance(result, dict)
 
     @patch("pipeline.hooks.call_llm_json", side_effect=LLMError("API down"))
     def test_story_fallback_returns_all_fields(self, mock_llm):
-        result = generate_hook("Paris", 5, "story")
+        result = generate_hook("Paris", 5, hook_format="story")
         assert "hook_text" in result
         assert "hook_image_prompt" in result
         assert "caption" in result
 
     @patch("pipeline.hooks.call_llm_json", side_effect=LLMError("API down"))
     def test_story_fallback_contains_city(self, mock_llm):
-        result = generate_hook("Paris", 5, "story")
+        result = generate_hook("Paris", 5, hook_format="story")
         assert "Paris" in result["hook_text"]
 
     @patch("pipeline.hooks.call_llm_json", side_effect=LLMError("API down"))
     def test_story_fallback_has_line_breaks(self, mock_llm):
-        result = generate_hook("Paris", 5, "story")
+        result = generate_hook("Paris", 5, hook_format="story")
         assert "\n" in result["hook_text"]
 
     @patch("pipeline.hooks.call_llm_json", side_effect=LLMError("timeout"))
     def test_story_fallback_caption_has_atlasi(self, mock_llm):
-        result = generate_hook("Paris", 5, "story")
+        result = generate_hook("Paris", 5, hook_format="story")
         assert "atlasi" in result["caption"].lower()
 
 
@@ -254,7 +250,7 @@ class TestInvalidLLMResponse:
             # hook_image_prompt missing
             "caption": "Atlasi #atlasi",
         }
-        result = generate_hook("Tokyo", 5, "listicle")
+        result = generate_hook("Tokyo", 5, hook_format="listicle")
         # Should still get a valid result via fallback
         assert "hook_text" in result
         assert "hook_image_prompt" in result
@@ -270,7 +266,7 @@ class TestInvalidLLMResponse:
             "hook_image_prompt": "Shot of Tokyo",
             "caption": "Atlasi #atlasi",
         }
-        result = generate_hook("Tokyo", 5, "listicle")
+        result = generate_hook("Tokyo", 5, hook_format="listicle")
         # Fallback kicks in
         assert len(result["hook_text"]) > 0
         assert "Tokyo" in result["hook_text"]
@@ -279,7 +275,7 @@ class TestInvalidLLMResponse:
     def test_non_dict_response_triggers_fallback(self, mock_llm):
         """LLM returns a list instead of dict."""
         mock_llm.return_value = ["not", "a", "dict"]
-        result = generate_hook("Tokyo", 5, "story")
+        result = generate_hook("Tokyo", 5, hook_format="story")
         assert isinstance(result, dict)
         assert "hook_text" in result
         assert "Tokyo" in result["hook_text"]

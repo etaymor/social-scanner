@@ -1,9 +1,8 @@
 """SQLite database setup, schema, and query helpers."""
 
+import re
 import sqlite3
 from pathlib import Path
-
-import re
 
 from config import DB_PATH, PLACE_REUSE_COOLDOWN_DAYS
 
@@ -402,26 +401,31 @@ def get_city_stats(conn: sqlite3.Connection, city_id: int) -> dict:
 # --- Slideshow helpers ---
 
 def create_slideshow(conn: sqlite3.Connection, city_id: int, category: str | None,
-                     format: str, hook_text: str, slide_count: int,
+                     hook_format: str, hook_text: str, slide_count: int,
                      output_dir: str) -> int:
-    """Insert a new slideshow row and return its id. Atomic transaction."""
-    with conn:
-        cur = conn.execute(
-            """INSERT INTO slideshows (city_id, category, format, hook_text, slide_count, output_dir)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (city_id, category, format, hook_text, slide_count, output_dir),
-        )
-        return cur.lastrowid
+    """Insert a new slideshow row and return its id.
+
+    Does NOT commit — the caller should commit after adding all
+    slideshow_places so the entire operation is atomic.
+    """
+    cur = conn.execute(
+        """INSERT INTO slideshows (city_id, category, format, hook_text, slide_count, output_dir)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (city_id, category, hook_format, hook_text, slide_count, output_dir),
+    )
+    return cur.lastrowid
 
 
 def add_slideshow_place(conn: sqlite3.Connection, slideshow_id: int,
                         place_id: int, slide_number: int) -> None:
-    """Link a place to a slideshow at a given slide position."""
+    """Link a place to a slideshow at a given slide position.
+
+    Does NOT commit — the caller should commit after adding all places.
+    """
     conn.execute(
         "INSERT INTO slideshow_places (slideshow_id, place_id, slide_number) VALUES (?, ?, ?)",
         (slideshow_id, place_id, slide_number),
     )
-    conn.commit()
 
 
 def get_available_places(conn: sqlite3.Connection, city_id: int,

@@ -187,7 +187,7 @@ class TestGenerateImage:
         with pytest.raises(GeminiError, match="Content filtered"):
             generate_image("test", out)
 
-    @patch("pipeline.image_gen.time.sleep")
+    @patch("pipeline.retry.time.sleep")
     @patch("pipeline.image_gen.requests.post")
     def test_retries_on_5xx(self, mock_post, mock_sleep, tmp_path):
         """Transient 500 errors are retried with exponential backoff."""
@@ -203,7 +203,7 @@ class TestGenerateImage:
         assert mock_post.call_count == 2
         mock_sleep.assert_called_once_with(2)  # base delay 2s * 2^0
 
-    @patch("pipeline.image_gen.time.sleep")
+    @patch("pipeline.retry.time.sleep")
     @patch("pipeline.image_gen.requests.post")
     def test_exhausts_retries(self, mock_post, mock_sleep, tmp_path):
         """After max retries, raises GeminiError."""
@@ -280,34 +280,6 @@ class TestGenerateSlideshowImages:
 
         assert result["generated"] == 5
         assert result["skipped"] == 0
-
-    @patch("pipeline.image_gen.requests.post")
-    def test_manual_override_used(self, mock_post, tmp_path):
-        """Override files are copied instead of generating."""
-        mock_post.return_value = _make_mock_response()
-
-        # Create override for slide 2 (by number)
-        override_path = tmp_path / "override_2.png"
-        override_content = b"\x89PNG_OVERRIDE_DATA" + b"\x00" * 100
-        override_path.write_bytes(override_content)
-
-        # Create override for Galata Tower (by slug) — this is slide 4
-        override_slug = tmp_path / "override_galata_tower.png"
-        slug_content = b"\x89PNG_SLUG_OVERRIDE" + b"\x00" * 100
-        override_slug.write_bytes(slug_content)
-
-        result = generate_slideshow_images(
-            tmp_path, SAMPLE_PLACES, "hook prompt",
-        )
-
-        # 2 overrides, 3 generated (hook, slide_3, CTA)
-        assert result["skipped"] == 2
-        assert result["generated"] == 3
-        assert mock_post.call_count == 3
-
-        # Verify overrides were copied
-        assert (tmp_path / "slide_2_raw.png").read_bytes() == override_content
-        assert (tmp_path / "slide_4_raw.png").read_bytes() == slug_content
 
     @patch("pipeline.image_gen.requests.post")
     def test_individual_slide_failure_continues(self, mock_post, tmp_path):

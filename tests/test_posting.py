@@ -34,6 +34,7 @@ def _ok_upload_response(index: int) -> MagicMock:
     """Return a mock response for a successful upload."""
     resp = MagicMock()
     resp.status_code = 200
+    resp.raise_for_status = MagicMock()  # no-op
     resp.json.return_value = {"id": f"img-{index}", "path": f"/uploads/img-{index}.png"}
     return resp
 
@@ -42,6 +43,7 @@ def _ok_post_response(post_id: str = "post-abc123") -> MagicMock:
     """Return a mock response for a successful post creation."""
     resp = MagicMock()
     resp.status_code = 200
+    resp.raise_for_status = MagicMock()  # no-op
     resp.json.return_value = {"id": post_id}
     return resp
 
@@ -91,7 +93,7 @@ class TestUploadImage:
         with pytest.raises(PostingAuthError, match="auth failed"):
             upload_image("bad-key", img)
 
-    @patch("pipeline.posting.time.sleep")
+    @patch("pipeline.retry.time.sleep")
     @patch("pipeline.posting.requests.post")
     def test_retries_on_5xx(self, mock_post, mock_sleep, tmp_path):
         img = tmp_path / "test.png"
@@ -99,7 +101,9 @@ class TestUploadImage:
 
         fail_resp = MagicMock()
         fail_resp.status_code = 500
-        fail_resp.text = "Internal Server Error"
+        fail_resp.raise_for_status = MagicMock(
+            side_effect=requests.HTTPError("Server error")
+        )
 
         mock_post.side_effect = [fail_resp, _ok_upload_response(1)]
 
@@ -108,7 +112,7 @@ class TestUploadImage:
         assert mock_post.call_count == 2
         mock_sleep.assert_called_once_with(2)  # base delay * 2^0
 
-    @patch("pipeline.posting.time.sleep")
+    @patch("pipeline.retry.time.sleep")
     @patch("pipeline.posting.requests.post")
     def test_retries_exhausted_raises(self, mock_post, mock_sleep, tmp_path):
         img = tmp_path / "test.png"
@@ -116,6 +120,9 @@ class TestUploadImage:
 
         fail_resp = MagicMock()
         fail_resp.status_code = 502
+        fail_resp.raise_for_status = MagicMock(
+            side_effect=requests.HTTPError("Server error")
+        )
 
         mock_post.return_value = fail_resp
 
@@ -172,11 +179,14 @@ class TestCreateTiktokPost:
         with pytest.raises(PostingAuthError):
             create_tiktok_post("bad-key", "integ-1", ["/a.png"], "caption")
 
-    @patch("pipeline.posting.time.sleep")
+    @patch("pipeline.retry.time.sleep")
     @patch("pipeline.posting.requests.post")
     def test_retries_on_5xx(self, mock_post, mock_sleep):
         fail_resp = MagicMock()
         fail_resp.status_code = 503
+        fail_resp.raise_for_status = MagicMock(
+            side_effect=requests.HTTPError("Server error")
+        )
 
         mock_post.side_effect = [fail_resp, _ok_post_response("post-ok")]
 

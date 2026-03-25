@@ -16,6 +16,10 @@ class HookSlideText:
     type: str = "hook"
     text: str = ""  # hook text with \n line breaks
 
+    def __post_init__(self) -> None:
+        if self.type != "hook":
+            raise ValueError(f"HookSlideText.type must be 'hook', got {self.type!r}")
+
 
 @dataclass
 class LocationSlideText:
@@ -26,6 +30,10 @@ class LocationSlideText:
     neighborhood: str = ""  # neighborhood / district
     number: str = ""  # e.g. "1/8"
 
+    def __post_init__(self) -> None:
+        if self.type != "location":
+            raise ValueError(f"LocationSlideText.type must be 'location', got {self.type!r}")
+
 
 @dataclass
 class CTASlideText:
@@ -33,6 +41,10 @@ class CTASlideText:
 
     type: str = "cta"
     text: str = ""  # CTA text
+
+    def __post_init__(self) -> None:
+        if self.type != "cta":
+            raise ValueError(f"CTASlideText.type must be 'cta', got {self.type!r}")
 
 
 # Union of all slide-text types
@@ -49,7 +61,7 @@ class SlideshowMeta:
 
     city: str
     category: str | None
-    format: str  # "listicle" or "story"
+    format: str  # "listicle" or "story" — name kept for JSON/DB compatibility
     hook_text: str
     slide_count: int
     created_at: str
@@ -105,12 +117,6 @@ def to_meta_json(meta: SlideshowMeta) -> str:
     return json.dumps(asdict(meta), indent=2, ensure_ascii=False)
 
 
-def from_meta_json(path: str | Path) -> SlideshowMeta:
-    """Deserialize a meta.json file into a SlideshowMeta."""
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
-    return SlideshowMeta(**data)
-
-
 # ---------------------------------------------------------------------------
 # Serialization helpers — post_meta.json
 # ---------------------------------------------------------------------------
@@ -129,53 +135,3 @@ def load_post_meta(path: str | Path) -> PostMeta:
     return PostMeta(**data)
 
 
-# ---------------------------------------------------------------------------
-# Validation
-# ---------------------------------------------------------------------------
-
-_VALID_SLIDE_TYPES = frozenset(_TYPE_MAP.keys())
-
-
-def validate_slides(slides: list[SlideText]) -> None:
-    """Validate a slide sequence.
-
-    Raises ValueError when:
-    - Any slide has an unrecognised type.
-    - The first slide is not a hook.
-    - The last slide is not a CTA.
-    - Location slide numbers are not sequential (``1/N``, ``2/N``, ..., ``N/N``).
-    """
-    if not slides:
-        raise ValueError("Slide list is empty")
-
-    # Check individual types
-    for i, slide in enumerate(slides):
-        if slide.type not in _VALID_SLIDE_TYPES:
-            raise ValueError(
-                f"Slide {i} has invalid type {slide.type!r}; "
-                f"expected one of {sorted(_VALID_SLIDE_TYPES)}"
-            )
-
-    # First must be hook
-    if slides[0].type != "hook":
-        raise ValueError(
-            f"First slide must be type 'hook', got {slides[0].type!r}"
-        )
-
-    # Last must be CTA
-    if slides[-1].type != "cta":
-        raise ValueError(
-            f"Last slide must be type 'cta', got {slides[-1].type!r}"
-        )
-
-    # Location numbers must be sequential 1/N .. N/N
-    location_slides = [s for s in slides if s.type == "location"]
-    if location_slides:
-        n = len(location_slides)
-        for idx, loc in enumerate(location_slides, start=1):
-            expected = f"{idx}/{n}"
-            if loc.number != expected:
-                raise ValueError(
-                    f"Location slide {idx} has number {loc.number!r}, "
-                    f"expected {expected!r}"
-                )

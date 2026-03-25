@@ -4,6 +4,7 @@ Ports Larry's proven overlay parameters (node-canvas) to Pillow,
 supporting hook, location, and CTA slide types.
 """
 
+import functools
 import logging
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from pipeline.slideshow_types import (
     from_texts_json,
 )
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants — Larry's proven viral-format parameters
@@ -43,6 +44,7 @@ _FONT_PATHS = [
 ]
 
 
+@functools.lru_cache(maxsize=16)
 def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     """Load a TrueType font at *size* pixels, falling back to Pillow default."""
     for font_path in _FONT_PATHS:
@@ -51,7 +53,7 @@ def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         except (OSError, IOError):
             continue
 
-    logger.warning(
+    log.warning(
         "Could not load any TrueType font; falling back to Pillow default. "
         "Text may look basic.  Install NotoSansCJK-Bold.ttc into assets/fonts/ "
         "for production quality."
@@ -282,25 +284,26 @@ def add_overlays(output_dir: str | Path) -> int:
     for idx, slide_text in enumerate(slides, start=1):
         out_path = output_dir / f"slide_{idx}.png"
         if out_path.exists():
-            logger.info("Skipping slide %d — %s already exists", idx, out_path.name)
+            log.info("Skipping slide %d — %s already exists", idx, out_path.name)
             continue
 
         raw_path = output_dir / f"slide_{idx}_raw.png"
         if not raw_path.exists():
-            logger.warning(
+            log.warning(
                 "Missing raw file for slide %d: %s — skipping", idx, raw_path.name
             )
             continue
 
-        image = Image.open(raw_path)
-        overlay_fn = _OVERLAY_DISPATCH.get(slide_text.type)
-        if overlay_fn is None:
-            logger.warning("Unknown slide type %r for slide %d — skipping", slide_text.type, idx)
-            continue
+        with Image.open(raw_path) as image:
+            overlay_fn = _OVERLAY_DISPATCH.get(slide_text.type)
+            if overlay_fn is None:
+                log.warning("Unknown slide type %r for slide %d — skipping", slide_text.type, idx)
+                continue
 
-        result = overlay_fn(image, slide_text)
-        result.save(out_path, format="PNG")
-        logger.info("Saved overlay slide %d → %s", idx, out_path.name)
+            result = overlay_fn(image, slide_text)
+            result.save(out_path, format="PNG")
+            result.close()
+        log.info("Saved overlay slide %d → %s", idx, out_path.name)
         applied += 1
 
     return applied

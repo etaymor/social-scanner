@@ -2,7 +2,6 @@
 
 import json
 import logging
-import time
 
 import requests
 
@@ -13,6 +12,7 @@ from config import (
     OPENROUTER_MODEL,
     OPENROUTER_RETRY_BASE_DELAY,
 )
+from pipeline.retry import retry_with_backoff
 
 log = logging.getLogger(__name__)
 
@@ -49,40 +49,29 @@ def call_llm(prompt: str, *, system: str = None, model: str = None, temperature:
         "response_format": {"type": "json_object"},
     }
 
-    last_error = None
-    for attempt in range(OPENROUTER_MAX_RETRIES):
-        try:
-            resp = requests.post(
-                OPENROUTER_BASE_URL, headers=headers, json=payload, timeout=120,
+    def _do_call():
+        resp = requests.post(
+            OPENROUTER_BASE_URL, headers=headers, json=payload, timeout=120,
+        )
+        if resp.status_code == 402:
+            raise CreditsExhaustedError(
+                "OpenRouter credits exhausted (HTTP 402). Add credits and retry."
             )
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"].strip()
 
-            if resp.status_code == 402:
-                raise CreditsExhaustedError(
-                    "OpenRouter credits exhausted (HTTP 402). Add credits and retry."
-                )
-
-            if resp.status_code == 429:
-                retry_after = int(resp.headers.get("retry-after", OPENROUTER_RETRY_BASE_DELAY * (2 ** attempt)))
-                log.warning("Rate limited, waiting %ds before retry", retry_after)
-                time.sleep(retry_after)
-                continue
-
-            resp.raise_for_status()
-            data = resp.json()
-            content = data["choices"][0]["message"]["content"]
-            return content.strip()
-
-        except CreditsExhaustedError:
-            raise
-        except (requests.RequestException, KeyError, IndexError) as e:
-            last_error = e
-            if attempt < OPENROUTER_MAX_RETRIES - 1:
-                delay = OPENROUTER_RETRY_BASE_DELAY * (2 ** attempt)
-                log.warning("LLM call failed (attempt %d/%d): %s. Retrying in %ds...",
-                            attempt + 1, OPENROUTER_MAX_RETRIES, e, delay)
-                time.sleep(delay)
-
-    raise LLMError(f"LLM call failed after {OPENROUTER_MAX_RETRIES} retries: {last_error}")
+    try:
+        return retry_with_backoff(
+            _do_call,
+            max_retries=OPENROUTER_MAX_RETRIES,
+            base_delay=OPENROUTER_RETRY_BASE_DELAY,
+            non_retryable=(CreditsExhaustedError,),
+        )
+    except CreditsExhaustedError:
+        raise
+    except Exception as e:
+        raise LLMError(f"LLM call failed after {OPENROUTER_MAX_RETRIES} retries: {e}") from e
 
 
 def sanitize_text(text: str, max_length: int = 2000) -> str:

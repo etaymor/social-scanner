@@ -88,7 +88,7 @@ class TestBuildParser:
         args = parser.parse_args(["--city", "Tokyo"])
         assert args.city == "Tokyo"
         assert args.slide_count == 8
-        assert args.format == "listicle"
+        assert args.hook_format == "listicle"
         assert args.post is False
         assert args.allow_reuse is False
         assert args.category is None
@@ -106,7 +106,7 @@ class TestBuildParser:
         ])
         assert args.category == "food_and_drink"
         assert args.slide_count == 6
-        assert args.format == "story"
+        assert args.hook_format == "story"
         assert args.post is True
         assert args.allow_reuse is True
         assert args.cta_template == "/path/to/cta.png"

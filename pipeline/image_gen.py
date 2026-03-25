@@ -4,8 +4,6 @@ import base64
 import json
 import logging
 import re
-import shutil
-import time
 from pathlib import Path
 
 import requests
@@ -17,6 +15,7 @@ from config import (
     OPENROUTER_API_KEY,
     OPENROUTER_BASE_URL,
 )
+from pipeline.retry import retry_with_backoff
 
 log = logging.getLogger(__name__)
 
@@ -113,88 +112,75 @@ def generate_image(
         },
     }
 
-    last_error: Exception | None = None
-    for attempt in range(GEMINI_MAX_RETRIES):
-        try:
-            resp = requests.post(
-                OPENROUTER_BASE_URL,
-                headers=headers,
-                json=payload,
-                timeout=GEMINI_TIMEOUT,
+    def _do_generate():
+        resp = requests.post(
+            OPENROUTER_BASE_URL,
+            headers=headers,
+            json=payload,
+            timeout=GEMINI_TIMEOUT,
+        )
+
+        if resp.status_code == 402:
+            raise GeminiQuotaError(
+                "OpenRouter credits exhausted (HTTP 402). Add credits and retry."
             )
 
-            # Non-retryable: credits exhausted
-            if resp.status_code == 402:
-                raise GeminiQuotaError(
-                    "OpenRouter credits exhausted (HTTP 402). Add credits and retry."
-                )
+        resp.raise_for_status()
+        data = resp.json()
 
-            # Retryable server errors
-            if resp.status_code >= 500:
-                resp.raise_for_status()
+        images = (
+            data.get("choices", [{}])[0]
+            .get("message", {})
+            .get("images", [])
+        )
 
-            # Other HTTP errors — raise for status
-            resp.raise_for_status()
-
-            data = resp.json()
-
-            # Extract image from response
-            images = (
-                data.get("choices", [{}])[0]
-                .get("message", {})
-                .get("images", [])
+        if not images:
+            raise GeminiError(
+                "Content filtered or blocked: no images in response"
             )
 
-            if not images:
-                raise GeminiError(
-                    "Content filtered or blocked: no images in response"
-                )
+        image_url = images[0].get("image_url", {}).get("url", "")
+        if not image_url:
+            raise GeminiError(
+                "Content filtered or blocked: empty image URL in response"
+            )
 
-            image_url = images[0].get("image_url", {}).get("url", "")
-            if not image_url:
-                raise GeminiError(
-                    "Content filtered or blocked: empty image URL in response"
-                )
+        prefix = "data:image/png;base64,"
+        if image_url.startswith(prefix):
+            b64_data = image_url[len(prefix):]
+        elif ";base64," in image_url:
+            b64_data = image_url.split(";base64,", 1)[1]
+        else:
+            b64_data = image_url
 
-            # Strip data URI prefix and decode
-            prefix = "data:image/png;base64,"
-            if image_url.startswith(prefix):
-                b64_data = image_url[len(prefix):]
-            else:
-                # Try generic data URI prefix
-                if ";base64," in image_url:
-                    b64_data = image_url.split(";base64,", 1)[1]
-                else:
-                    b64_data = image_url
+        image_bytes = base64.b64decode(b64_data)
 
-            image_bytes = base64.b64decode(b64_data)
+        MAX_IMAGE_SIZE = 50 * 1024 * 1024  # 50 MB
+        if len(image_bytes) > MAX_IMAGE_SIZE:
+            raise GeminiError(f"Decoded image too large: {len(image_bytes)} bytes")
+        if not image_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+            raise GeminiError("Decoded data is not a valid PNG image")
 
-            # Save to output path
-            output_path = Path(output_path)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(image_bytes)
+        dest = Path(output_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(image_bytes)
 
-            log.info("Image saved to %s (%d bytes)", output_path, len(image_bytes))
-            return True
+        log.info("Image saved to %s (%d bytes)", dest, len(image_bytes))
+        return True
 
-        except GeminiQuotaError:
-            raise
-        except GeminiError:
-            # Content filtering is non-retryable
-            raise
-        except (requests.RequestException, KeyError, IndexError) as e:
-            last_error = e
-            if attempt < GEMINI_MAX_RETRIES - 1:
-                delay = _RETRY_BASE_DELAY * (2 ** attempt)
-                log.warning(
-                    "Image generation failed (attempt %d/%d): %s. Retrying in %ds...",
-                    attempt + 1, GEMINI_MAX_RETRIES, e, delay,
-                )
-                time.sleep(delay)
-
-    raise GeminiError(
-        f"Image generation failed after {GEMINI_MAX_RETRIES} retries: {last_error}"
-    )
+    try:
+        return retry_with_backoff(
+            _do_generate,
+            max_retries=GEMINI_MAX_RETRIES,
+            base_delay=_RETRY_BASE_DELAY,
+            non_retryable=(GeminiQuotaError, GeminiError),
+        )
+    except (GeminiQuotaError, GeminiError):
+        raise
+    except Exception as e:
+        raise GeminiError(
+            f"Image generation failed after {GEMINI_MAX_RETRIES} retries: {e}"
+        ) from e
 
 
 # ---------------------------------------------------------------------------
@@ -252,11 +238,8 @@ def generate_slideshow_images(
     prompts["slide_1_hook"] = hook_image_prompt
 
     try:
-        if _should_skip(output_dir, hook_path, 1, None):
-            log.info("Slide 1 (hook): skipped (exists or override)")
-            skipped += 1
-        elif _apply_override(output_dir, 1, None, hook_path):
-            log.info("Slide 1 (hook): using manual override")
+        if _should_skip(hook_path):
+            log.info("Slide 1 (hook): skipped (exists)")
             skipped += 1
         else:
             log.info("Slide 1 (hook): generating...")
@@ -281,11 +264,8 @@ def generate_slideshow_images(
         prompts[f"slide_{slide_num}_{_slugify(place_name)}"] = full_prompt
 
         try:
-            if _should_skip(output_dir, slide_path, slide_num, place_name):
-                log.info("Slide %d (%s): skipped (exists or override)", slide_num, place_name)
-                skipped += 1
-            elif _apply_override(output_dir, slide_num, place_name, slide_path):
-                log.info("Slide %d (%s): using manual override", slide_num, place_name)
+            if _should_skip(slide_path):
+                log.info("Slide %d (%s): skipped (exists)", slide_num, place_name)
                 skipped += 1
             else:
                 log.info("Slide %d (%s): generating...", slide_num, place_name)
@@ -312,11 +292,8 @@ def generate_slideshow_images(
         reference_images = [Path(cta_template_path)]
 
     try:
-        if _should_skip(output_dir, cta_path, cta_slide_num, None):
-            log.info("Slide %d (CTA): skipped (exists or override)", cta_slide_num)
-            skipped += 1
-        elif _apply_override(output_dir, cta_slide_num, None, cta_path):
-            log.info("Slide %d (CTA): using manual override", cta_slide_num)
+        if _should_skip(cta_path):
+            log.info("Slide %d (CTA): skipped (exists)", cta_slide_num)
             skipped += 1
         else:
             log.info("Slide %d (CTA): generating...", cta_slide_num)
@@ -359,31 +336,8 @@ def generate_slideshow_images(
 _MIN_FILE_SIZE = 10 * 1024  # 10 KB
 
 
-def _should_skip(output_dir: Path, slide_path: Path, slide_num: int, place_name: str | None) -> bool:
+def _should_skip(slide_path: Path) -> bool:
     """Return True if the slide image already exists and is large enough."""
-    if slide_path.exists() and slide_path.stat().st_size > _MIN_FILE_SIZE:
-        return True
-    return False
+    return slide_path.exists() and slide_path.stat().st_size > _MIN_FILE_SIZE
 
 
-def _apply_override(
-    output_dir: Path,
-    slide_num: int,
-    place_name: str | None,
-    dest_path: Path,
-) -> bool:
-    """Check for manual override files and copy them if found.
-
-    Looks for ``override_{slide_num}.png`` or ``override_{slug}.png`` in
-    output_dir. Returns True if an override was applied.
-    """
-    candidates = [output_dir / f"override_{slide_num}.png"]
-    if place_name:
-        candidates.append(output_dir / f"override_{_slugify(place_name)}.png")
-
-    for candidate in candidates:
-        if candidate.exists():
-            shutil.copy2(candidate, dest_path)
-            log.info("Applied override %s -> %s", candidate, dest_path)
-            return True
-    return False

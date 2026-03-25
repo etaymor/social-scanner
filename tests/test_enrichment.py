@@ -7,7 +7,7 @@ from unittest.mock import call, patch
 import pytest
 
 from pipeline import db
-from pipeline.enrichment import enrich_places, _needs_enrichment, _parse_enrichment_response
+from pipeline.enrichment import enrich_places, _needs_enrichment, _extract_results
 
 
 # ---------------------------------------------------------------------------
@@ -27,9 +27,9 @@ def _insert_place(conn, city_id, name, place_type="restaurant", category="food_a
     return cur.lastrowid
 
 
-def _make_llm_response(enrichments: list[dict]) -> str:
-    """Build a JSON string mimicking what call_llm returns."""
-    return json.dumps({"results": enrichments})
+def _make_llm_response(enrichments: list[dict]) -> dict:
+    """Build a dict mimicking what call_llm_json returns."""
+    return {"results": enrichments}
 
 
 def _get_place(conn, place_id):
@@ -67,35 +67,32 @@ class TestNeedsEnrichment:
 
 
 # ---------------------------------------------------------------------------
-# Unit tests for _parse_enrichment_response
+# Unit tests for _extract_results
 # ---------------------------------------------------------------------------
 
-class TestParseEnrichmentResponse:
-    def test_valid_json_object(self):
-        raw = json.dumps({"results": [{"place_id": 1, "neighborhood": "X", "image_prompt": "Y"}]})
-        result = _parse_enrichment_response(raw)
+class TestExtractResults:
+    def test_dict_with_results_key(self):
+        parsed = {"results": [{"place_id": 1, "neighborhood": "X", "image_prompt": "Y"}]}
+        result = _extract_results(parsed)
         assert len(result) == 1
         assert result[0]["place_id"] == 1
 
-    def test_valid_json_array(self):
-        raw = json.dumps([{"place_id": 1, "neighborhood": "X", "image_prompt": "Y"}])
-        result = _parse_enrichment_response(raw)
+    def test_list_input(self):
+        parsed = [{"place_id": 1, "neighborhood": "X", "image_prompt": "Y"}]
+        result = _extract_results(parsed)
         assert len(result) == 1
 
-    def test_markdown_code_fences(self):
-        inner = json.dumps({"results": [{"place_id": 1, "neighborhood": "X", "image_prompt": "Y"}]})
-        raw = f"```json\n{inner}\n```"
-        result = _parse_enrichment_response(raw)
-        assert len(result) == 1
-
-    def test_garbage_returns_empty(self):
-        result = _parse_enrichment_response("this is not json at all")
+    def test_empty_dict_returns_empty(self):
+        result = _extract_results({})
         assert result == []
 
-    def test_embedded_json(self):
-        raw = 'Here is the result: {"results": [{"place_id": 1, "neighborhood": "X", "image_prompt": "Y"}]} done.'
-        result = _parse_enrichment_response(raw)
-        assert len(result) == 1
+    def test_non_list_results_returns_empty(self):
+        result = _extract_results({"results": "not a list"})
+        assert result == []
+
+    def test_string_input_returns_empty(self):
+        result = _extract_results("not a dict or list")
+        assert result == []
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +100,7 @@ class TestParseEnrichmentResponse:
 # ---------------------------------------------------------------------------
 
 class TestEnrichPlaces:
-    @patch("pipeline.enrichment.call_llm")
+    @patch("pipeline.enrichment.call_llm_json")
     def test_skips_already_enriched_places(self, mock_llm, conn, city_id):
         """Places with existing enrichment (both fields) should be skipped entirely."""
         _insert_place(conn, city_id, "Complete Place",
@@ -115,7 +112,7 @@ class TestEnrichPlaces:
         assert result == 0
         mock_llm.assert_not_called()
 
-    @patch("pipeline.enrichment.call_llm")
+    @patch("pipeline.enrichment.call_llm_json")
     def test_enriches_places_missing_fields(self, mock_llm, conn, city_id):
         """Places missing either neighborhood or image_prompt should be enriched."""
         pid1 = _insert_place(conn, city_id, "Place A")  # missing both
@@ -141,7 +138,7 @@ class TestEnrichPlaces:
         assert place_b["neighborhood"] == "Beyoglu"
         assert place_b["image_prompt"] == "A cozy rooftop bar"
 
-    @patch("pipeline.enrichment.call_llm")
+    @patch("pipeline.enrichment.call_llm_json")
     def test_handles_llm_failure_gracefully(self, mock_llm, conn, city_id):
         """LLM failure for a batch should log error and continue with remaining batches."""
         from pipeline.llm import LLMError
@@ -181,7 +178,7 @@ class TestEnrichPlaces:
             assert place["neighborhood"] is not None
             assert place["image_prompt"] is not None
 
-    @patch("pipeline.enrichment.call_llm")
+    @patch("pipeline.enrichment.call_llm_json")
     def test_partial_batch_processes_correctly(self, mock_llm, conn, city_id):
         """A batch with fewer than 10 places should process correctly."""
         pids = []
@@ -206,7 +203,7 @@ class TestEnrichPlaces:
             assert place["neighborhood"] == f"Area {i}"
             assert place["image_prompt"] == f"Visual {i}"
 
-    @patch("pipeline.enrichment.call_llm")
+    @patch("pipeline.enrichment.call_llm_json")
     def test_idempotent_no_duplicate_calls(self, mock_llm, conn, city_id):
         """Running enrichment twice should not make duplicate LLM calls."""
         pid = _insert_place(conn, city_id, "Idempotent Place")
@@ -228,7 +225,7 @@ class TestEnrichPlaces:
         # No additional LLM call
         assert mock_llm.call_count == 1
 
-    @patch("pipeline.enrichment.call_llm")
+    @patch("pipeline.enrichment.call_llm_json")
     def test_db_committed_after_each_batch(self, mock_llm, conn, city_id):
         """DB should be committed after each batch to preserve progress."""
         # Create 15 places -> 2 batches
@@ -267,7 +264,7 @@ class TestEnrichPlaces:
         assert result == 15
         assert mock_llm.call_count == 2
 
-    @patch("pipeline.enrichment.call_llm")
+    @patch("pipeline.enrichment.call_llm_json")
     def test_skips_places_with_missing_enrichment_data(self, mock_llm, conn, city_id):
         """Places for which the LLM returns incomplete data should be skipped."""
         pid1 = _insert_place(conn, city_id, "Good Data")
@@ -295,19 +292,21 @@ class TestEnrichPlaces:
         place3 = _get_place(conn, pid3)
         assert place3["image_prompt"] is None  # not updated
 
-    @patch("pipeline.enrichment.call_llm")
+    @patch("pipeline.enrichment.call_llm_json")
     def test_empty_places_list(self, mock_llm, conn, city_id):
         """Empty places list should return 0 and not call LLM."""
         result = enrich_places(conn, [], "Istanbul")
         assert result == 0
         mock_llm.assert_not_called()
 
-    @patch("pipeline.enrichment.call_llm")
-    def test_malformed_json_response_continues(self, mock_llm, conn, city_id):
-        """A completely garbled LLM response should not crash; batch is skipped."""
+    @patch("pipeline.enrichment.call_llm_json")
+    def test_llm_json_error_continues(self, mock_llm, conn, city_id):
+        """An LLM JSON parse error should not crash; batch is skipped."""
+        from pipeline.llm import LLMError
+
         pid = _insert_place(conn, city_id, "Garbled Place")
 
-        mock_llm.return_value = "this is not json at all {{{broken"
+        mock_llm.side_effect = LLMError("Failed to parse LLM response as JSON")
 
         places = db.get_all_places(conn, city_id)
         result = enrich_places(conn, places, "Istanbul")

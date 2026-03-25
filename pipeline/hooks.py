@@ -4,7 +4,7 @@ import json
 import logging
 import random
 
-from .llm import call_llm_json, LLMError
+from .llm import call_llm_json, LLMError, sanitize_text
 
 log = logging.getLogger(__name__)
 
@@ -62,17 +62,19 @@ Return ONLY a JSON object with these keys:
 
 def _build_listicle_prompt(city_name: str, slide_count: int, category: str | None) -> str:
     """Build the user prompt for listicle hook generation."""
+    safe_city = sanitize_text(city_name, max_length=200)
+    safe_category = sanitize_text(category, max_length=100) if category else None
     templates_formatted = "\n".join(
-        f"  - {t.format(n=slide_count, city=city_name)}"
+        f"  - {t.format(n=slide_count, city=safe_city)}"
         for t in HOOK_TEMPLATES["listicle"]
     )
     parts = [
-        f"City: {city_name}",
+        f"City: {safe_city}",
         f"Number of places: {slide_count}",
         f"Templates:\n{templates_formatted}",
     ]
-    if category:
-        parts.append(f"Category: {category}")
+    if safe_category:
+        parts.append(f"Category: {safe_category}")
     parts.append(
         "Pick the best template (or customize it) for this city/category. "
         "Return the JSON object."
@@ -82,13 +84,15 @@ def _build_listicle_prompt(city_name: str, slide_count: int, category: str | Non
 
 def _build_story_prompt(city_name: str, slide_count: int, category: str | None) -> str:
     """Build the user prompt for story hook generation."""
+    safe_city = sanitize_text(city_name, max_length=200)
+    safe_category = sanitize_text(category, max_length=100) if category else None
     parts = [
         "Generate a TikTok hook in the person+conflict travel discovery format.",
-        f"City: {city_name}",
+        f"City: {safe_city}",
         f"Number of places: {slide_count}",
     ]
-    if category:
-        parts.append(f"Category: {category}")
+    if safe_category:
+        parts.append(f"Category: {safe_category}")
     parts.append("Return the JSON object.")
     return "\n".join(parts)
 
@@ -137,23 +141,21 @@ def _validate_hook_result(result: dict) -> bool:
 def generate_hook(
     city_name: str,
     slide_count: int,
-    format: str,
+    hook_format: str,
     category: str | None = None,
-    places: list | None = None,
 ) -> dict:
     """Generate hook text, hook image prompt, and TikTok caption.
 
     Args:
         city_name: The target city.
         slide_count: Number of place slides in the slideshow.
-        format: Either "listicle" or "story".
+        hook_format: Either "listicle" or "story".
         category: Optional category slug (e.g. "food_and_drink").
-        places: Optional list of place dicts (unused currently, reserved for future).
 
     Returns:
         Dict with keys: hook_text, hook_image_prompt, caption.
     """
-    if format == "listicle":
+    if hook_format == "listicle":
         system = _LISTICLE_SYSTEM
         prompt = _build_listicle_prompt(city_name, slide_count, category)
         fallback_fn = _fallback_listicle
@@ -167,7 +169,7 @@ def generate_hook(
         if not isinstance(result, dict) or not _validate_hook_result(result):
             log.warning(
                 "LLM returned invalid hook structure for %s (%s); using fallback",
-                city_name, format,
+                city_name, hook_format,
             )
             return fallback_fn(city_name, slide_count, category)
         return {
@@ -178,7 +180,7 @@ def generate_hook(
     except LLMError:
         log.warning(
             "LLM call failed for hook generation (%s, %s); using fallback",
-            city_name, format,
+            city_name, hook_format,
             exc_info=True,
         )
         return fallback_fn(city_name, slide_count, category)

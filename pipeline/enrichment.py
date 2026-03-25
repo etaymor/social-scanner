@@ -1,11 +1,10 @@
 """LLM enrichment for places — adds neighborhood and image prompt data."""
 
-import json
 import logging
 import math
 import sqlite3
 
-from .llm import call_llm, LLMError, sanitize_text
+from .llm import call_llm_json, LLMError, sanitize_text
 
 log = logging.getLogger(__name__)
 
@@ -41,57 +40,27 @@ def _build_place_list(places: list[sqlite3.Row]) -> str:
     """Format places as a numbered list for the LLM prompt."""
     lines: list[str] = []
     for place in places:
+        name = sanitize_text(place["name"] or "", max_length=200)
+        place_type = sanitize_text(place["type"] or "", max_length=100)
+        category = sanitize_text(place["category"] or "unknown", max_length=100)
         sample = sanitize_text(place["sample_caption"] or "", max_length=200)
         caption_part = f', sample caption: "{sample}"' if sample else ""
         lines.append(
-            f"- ID {place['id']}: {place['name']} (type: {place['type']}, "
-            f"category: {place['category'] or 'unknown'}{caption_part})"
+            f"- ID {place['id']}: {name} (type: {place_type}, "
+            f"category: {category}{caption_part})"
         )
     return "\n".join(lines)
 
 
-def _parse_enrichment_response(raw: str) -> list[dict]:
-    """Defensively parse the LLM JSON response into a list of enrichment dicts."""
-    text = raw.strip()
-
-    # Strip markdown code fences if present
-    if text.startswith("```"):
-        lines = text.split("\n")
-        lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines)
-
-    # Try direct parse
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        # Try to extract JSON object or array from the response
-        for start_char, end_char in [("{", "}"), ("[", "]")]:
-            start = text.find(start_char)
-            end = text.rfind(end_char)
-            if start != -1 and end != -1 and end > start:
-                try:
-                    parsed = json.loads(text[start:end + 1])
-                    break
-                except json.JSONDecodeError:
-                    continue
-        else:
-            log.warning("Failed to parse LLM enrichment response as JSON")
-            return []
-
-    # Extract results array
+def _extract_results(parsed: dict | list) -> list[dict]:
+    """Extract the results array from the parsed LLM response."""
     if isinstance(parsed, dict):
         results = parsed.get("results", [])
     elif isinstance(parsed, list):
         results = parsed
     else:
         return []
-
-    if not isinstance(results, list):
-        return []
-
-    return results
+    return results if isinstance(results, list) else []
 
 
 def enrich_places(
@@ -140,7 +109,7 @@ def enrich_places(
         )
 
         try:
-            raw_response = call_llm(prompt, system=SYSTEM_PROMPT, temperature=0.4)
+            parsed = call_llm_json(prompt, system=SYSTEM_PROMPT, temperature=0.4)
         except LLMError:
             log.exception(
                 "LLM call failed for enrichment batch %d/%d — skipping",
@@ -148,7 +117,7 @@ def enrich_places(
             )
             continue
 
-        results = _parse_enrichment_response(raw_response)
+        results = _extract_results(parsed)
 
         # Build a lookup from place_id to enrichment data
         enrichment_lookup: dict[int, dict] = {}
