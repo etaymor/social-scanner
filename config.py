@@ -116,6 +116,42 @@ TYPE_TO_CATEGORY = {
 
 VALID_PLACE_TYPES = frozenset(TYPE_TO_CATEGORY.keys()) | {"other"}
 
+# RevenueCat (conversion tracking)
+REVENUECAT_V2_SECRET_KEY = os.getenv("REVENUECAT_V2_SECRET_KEY", "")
+REVENUECAT_PROJECT_ID = os.getenv("REVENUECAT_PROJECT_ID", "")
+REVENUECAT_BASE_URL = "https://api.revenuecat.com/v2"
+
+# Analytics intelligence loop
+PERFORMANCE_WEIGHTS_PATH = Path("performance_weights.json")
+ANALYTICS_LOOKBACK_DAYS = 3
+ATTRIBUTION_WINDOW_HOURS = 72
+STALE_DRAFT_HOURS = 72
+POST_MATURATION_HOURS = 48
+MIN_POSTS_FOR_WEIGHT = 3
+WEIGHT_PRIOR_N = 5
+EXPLOIT_RATIO = 0.7
+WEIGHT_DECAY_DAYS = 30
+WEIGHT_DECAY_FACTOR = 0.95  # per-day decay, ~14-day half-life
+MAX_WEIGHT_DELTA_PER_DAY = 0.2
+MIN_WEIGHT = 0.5
+MAX_WEIGHT = 2.0
+MAX_COMBINED_WEIGHT_RATIO = 10
+SCORE_VIEWS_WEIGHT = 1.0  # alpha for composite; 0.6 when RC is configured
+CIRCUIT_BREAKER_THRESHOLD = 0.5  # reset weights if 7d avg < 50% of 30d avg
+
+# Decision rule thresholds (views at 48h)
+VIEWS_SCALE = 50_000
+VIEWS_GOOD = 10_000
+VIEWS_TEST = 1_000
+
+# CTA variants for weighted selection
+CTA_VARIANTS = [
+    "Find more hidden gems\non Atlasi",
+    "Track your travels\nwith Atlasi",
+    "Save spots from TikTok\nstraight to Atlasi",
+    "Share your favorite spots\non Atlasi",
+]
+
 CATEGORY_HASHTAG_SEEDS = {
     "food_and_drink": {
         "suffixes": ["food", "foodie", "eats", "restaurants", "cafes"],
