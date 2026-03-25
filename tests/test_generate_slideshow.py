@@ -97,7 +97,7 @@ class TestBuildParser:
         args = parser.parse_args(["--city", "Tokyo"])
         assert args.city == "Tokyo"
         assert args.slide_count == 8
-        assert args.hook_format == "listicle"
+        assert args.hook_format is None  # auto-selected by weights at runtime
         assert args.post is False
         assert args.allow_reuse is False
         assert args.category is None
@@ -175,7 +175,7 @@ def _run_pipeline(seeded_conn, tmp_path, args_list, mock_post=None):
             "caption": "Tokyo hidden gems #tokyo #travel",
         }
     )
-    def fake_img_gen(output_dir, places, hook_image_prompt, cta_template_path=None, style=None):
+    def fake_img_gen(output_dir, places, hook_image_prompt, cta_template_path=None, style=None, **kwargs):
         n = len(places) + 2  # hook + locations + CTA
         return {
             "generated": n,
@@ -200,14 +200,50 @@ def _run_pipeline(seeded_conn, tmp_path, args_list, mock_post=None):
         )
     )
 
+    # Default performance weights (all empty -> 1.0 defaults)
+    from pipeline.intelligence import DIMENSIONS
+
+    mock_weights = {d: {} for d in DIMENSIONS}
+
+    # Default visual style for mocking select_weighted_style
+    default_style = {
+        "time_of_day": {"name": "golden_hour", "desc": "warm golden-hour"},
+        "weather": {"name": "clear", "desc": "crystal-clear air"},
+        "perspective": {"name": "street_level", "desc": "low street-level"},
+        "color_mood": {"name": "warm_analog", "desc": "warm analog film tones"},
+    }
+
+    # Deterministic weighted_choice: returns predictable values compatible
+    # with the seeded test data (all places are food_and_drink category).
+    from config import CTA_VARIANTS as _cta_variants
+
+    _wc_defaults = {
+        "food_and_drink": True,  # marker: category pool
+        "listicle": True,  # marker: format pool
+    }
+
+    def deterministic_weighted_choice(options, weights_dict, default_weight=1.0):
+        opts = list(options)
+        # Return food_and_drink if it's in the options (category selection)
+        if "food_and_drink" in opts:
+            return "food_and_drink"
+        # Return listicle if it's in the options (format selection)
+        if "listicle" in opts:
+            return "listicle"
+        # For CTA or anything else, return the first option
+        return opts[0]
+
     wrapped_conn = _UnclosableConnection(seeded_conn)
 
     with (
         patch("sys.argv", ["generate_slideshow.py", *args_list]),
         patch("generate_slideshow.db.get_connection", return_value=wrapped_conn),
+        patch("generate_slideshow.read_weights", return_value=mock_weights),
+        patch("generate_slideshow.weighted_choice", side_effect=deterministic_weighted_choice),
         patch("pipeline.enrichment.enrich_places", mock_enrich),
         patch("pipeline.hooks.generate_hook", mock_hook),
         patch("pipeline.image_gen.generate_slideshow_images", mock_img_gen),
+        patch("pipeline.image_styles.select_weighted_style", return_value=default_style),
         patch("pipeline.overlay.add_overlays", mock_overlay),
         patch("pipeline.posting.post_slideshow", mock_post_fn),
         patch("generate_slideshow.SLIDESHOW_OUTPUT_DIR", tmp_path),
