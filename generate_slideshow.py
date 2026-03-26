@@ -2,6 +2,7 @@
 """Atlasi Slideshow Generator — CLI entrypoint and orchestrator."""
 
 import argparse
+import json
 import logging
 import re
 import shutil
@@ -11,12 +12,15 @@ from pathlib import Path
 
 from config import (
     CATEGORIES,
+    CTA_VARIANTS,
     SLIDESHOW_OUTPUT_DIR,
     VALID_CATEGORIES,
 )
 from pipeline import db
 from pipeline.image_gen import GeminiQuotaError
+from pipeline.intelligence import read_weights
 from pipeline.llm import CreditsExhaustedError
+from pipeline.weighted_selection import weighted_choice, weighted_rank
 from pipeline.slideshow_types import (
     CTASlideText,
     HookSlideText,
@@ -55,8 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--format",
         dest="hook_format",
         choices=["listicle", "story"],
-        default="listicle",
-        help="Hook format (default: listicle)",
+        default=None,
+        help="Hook format (default: auto-selected by weights, or listicle)",
     )
     parser.add_argument(
         "--post", action="store_true", help="Post to TikTok as draft via Postiz after generation"
@@ -105,6 +109,32 @@ def main() -> None:
     try:
         db.init_db(conn)
 
+        # Read performance weights for intelligence-loop biasing
+        perf_weights = read_weights()
+
+        # Auto-select category if not explicitly provided
+        if args.category is None:
+            args.category = weighted_choice(
+                sorted(VALID_CATEGORIES),
+                perf_weights.get("category", {}),
+            )
+            log.info("Auto-selected category: %s (weighted)", args.category)
+
+        # Auto-select hook format if not explicitly provided
+        if args.hook_format is None:
+            args.hook_format = weighted_choice(
+                ["listicle", "story"],
+                perf_weights.get("format", {}),
+            )
+            log.info("Auto-selected hook format: %s (weighted)", args.hook_format)
+
+        # Auto-select CTA text using weights
+        cta_text = weighted_choice(
+            CTA_VARIANTS,
+            perf_weights.get("cta", {}),
+        )
+        log.info("Selected CTA: %s", cta_text.replace("\n", " | "))
+
         # Step 1/11: Validate city
         log.info("Step 1/11: Validating city...")
         city_name = args.city.strip()
@@ -144,8 +174,30 @@ def main() -> None:
             )
             slide_count = len(available)
 
-        # Select top N places by virality score (already ordered)
-        selected_places = available[:slide_count]
+        # Select top N places, biased by virality band weights
+        virality_band_weights = perf_weights.get("virality_band", {})
+
+        def _place_virality_score(place: object) -> float:
+            return float(dict(place).get("virality_score", 0.0))
+
+        def _place_band_weight(place: object) -> float:
+            score = float(dict(place).get("virality_score", 0.0))
+            if score < 25:
+                band = "0-25"
+            elif score < 50:
+                band = "25-50"
+            elif score < 75:
+                band = "50-75"
+            else:
+                band = "75-100"
+            return virality_band_weights.get(band, 1.0)
+
+        selected_places = weighted_rank(
+            available,
+            score_fn=_place_virality_score,
+            weight_fn=_place_band_weight,
+            count=slide_count,
+        )
         place_names = [dict(p)["name"] for p in selected_places]
         log.info("Selected %d places: %s", slide_count, ", ".join(place_names))
 
@@ -203,9 +255,15 @@ def main() -> None:
         # Step 6/11: Generate images
         log.info("Step 6/11: Generating images...")
         from pipeline.image_gen import generate_slideshow_images
-        from pipeline.image_styles import select_slideshow_style
+        from pipeline.image_styles import select_weighted_style
 
-        visual_style = select_slideshow_style(city_name, date_str)
+        visual_style = select_weighted_style(perf_weights)
+        style_json = json.dumps({
+            "time_of_day": visual_style["time_of_day"]["name"],
+            "weather": visual_style["weather"]["name"],
+            "perspective": visual_style["perspective"]["name"],
+            "color_mood": visual_style["color_mood"]["name"],
+        })
         log.info(
             "Visual style: %s + %s + %s + %s",
             visual_style["time_of_day"]["name"],
@@ -262,7 +320,7 @@ def main() -> None:
                     number=f"{i}/{slide_count}",
                 )
             )
-        slides.append(CTASlideText(text="Find more hidden gems\non Atlasi"))
+        slides.append(CTASlideText(text=cta_text))
 
         texts_path = output_dir / "texts.json"
         texts_path.write_text(to_texts_json(slides), encoding="utf-8")
@@ -331,6 +389,7 @@ def main() -> None:
         )
         for i, p in enumerate(selected_places, start=1):
             db.add_slideshow_place(conn, slideshow_id, dict(p)["id"], slide_number=i)
+        db.update_slideshow_metadata(conn, slideshow_id, visual_style_json=style_json, cta_text=cta_text)
         conn.commit()
         log.info("Slideshow recorded (id=%d)", slideshow_id)
 

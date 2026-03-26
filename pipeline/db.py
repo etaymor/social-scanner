@@ -151,6 +151,101 @@ def init_db(conn: sqlite3.Connection) -> None:
             ON slideshow_places(place_id);
     """)
 
+    # Migrations — add analytics columns to slideshows
+    for col, typedef in (
+        ("tiktok_release_id", "TEXT DEFAULT NULL"),
+        ("visual_style", "TEXT DEFAULT NULL"),
+        ("cta_text", "TEXT DEFAULT NULL"),
+        ("publish_status", "TEXT DEFAULT 'draft'"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE slideshows ADD COLUMN {col} {typedef}")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" not in str(e):
+                raise
+
+    # Analytics tables
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS slideshow_analytics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            slideshow_id INTEGER NOT NULL REFERENCES slideshows(id) ON DELETE CASCADE,
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            views INTEGER DEFAULT 0,
+            likes INTEGER DEFAULT 0,
+            comments INTEGER DEFAULT 0,
+            shares INTEGER DEFAULT 0,
+            saves INTEGER DEFAULT 0,
+            views_estimated BOOLEAN DEFAULT FALSE
+        );
+
+        CREATE TABLE IF NOT EXISTS platform_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            followers INTEGER DEFAULT 0,
+            total_views INTEGER DEFAULT 0,
+            total_likes INTEGER DEFAULT 0,
+            recent_comments INTEGER DEFAULT 0,
+            recent_shares INTEGER DEFAULT 0,
+            videos INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS rc_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            mrr REAL DEFAULT 0.0,
+            active_trials INTEGER DEFAULT 0,
+            active_subscriptions INTEGER DEFAULT 0,
+            active_users INTEGER DEFAULT 0,
+            new_customers INTEGER DEFAULT 0,
+            revenue REAL DEFAULT 0.0
+        );
+
+        CREATE TABLE IF NOT EXISTS trial_attributions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trial_id TEXT UNIQUE NOT NULL,
+            slideshow_id INTEGER NOT NULL REFERENCES slideshows(id) ON DELETE CASCADE,
+            attributed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS slideshow_performance (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            slideshow_id INTEGER NOT NULL REFERENCES slideshows(id) ON DELETE CASCADE,
+            evaluated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            views_at_48h INTEGER DEFAULT 0,
+            views_latest INTEGER DEFAULT 0,
+            likes INTEGER DEFAULT 0,
+            comments INTEGER DEFAULT 0,
+            shares INTEGER DEFAULT 0,
+            saves INTEGER DEFAULT 0,
+            conversions INTEGER DEFAULT 0,
+            conversion_rate REAL DEFAULT 0.0,
+            composite_score REAL DEFAULT 0.0,
+            views_estimated BOOLEAN DEFAULT FALSE,
+            views_confidence REAL DEFAULT 1.0,
+            decision_tag TEXT CHECK(decision_tag IN ('scale', 'keep', 'test', 'drop'))
+        );
+    """)
+
+    # Analytics indexes
+    conn.executescript("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_slideshow_analytics_daily
+            ON slideshow_analytics(slideshow_id, DATE(fetched_at));
+        CREATE INDEX IF NOT EXISTS idx_slideshow_analytics_slideshow
+            ON slideshow_analytics(slideshow_id, fetched_at);
+        CREATE INDEX IF NOT EXISTS idx_platform_stats_fetched
+            ON platform_stats(fetched_at);
+        CREATE INDEX IF NOT EXISTS idx_rc_snapshots_fetched
+            ON rc_snapshots(fetched_at);
+        CREATE INDEX IF NOT EXISTS idx_slideshows_postiz
+            ON slideshows(postiz_post_id);
+        CREATE INDEX IF NOT EXISTS idx_slideshows_publish_status
+            ON slideshows(publish_status, posted_at);
+        CREATE INDEX IF NOT EXISTS idx_slideshow_performance_slideshow
+            ON slideshow_performance(slideshow_id, evaluated_at);
+        CREATE INDEX IF NOT EXISTS idx_slideshow_performance_decision
+            ON slideshow_performance(decision_tag);
+    """)
+
     conn.commit()
 
 
@@ -507,6 +602,22 @@ def get_available_places(
         f"SELECT p.* FROM places p {where} ORDER BY p.virality_score DESC",
         params,
     ).fetchall()
+
+
+def update_slideshow_metadata(
+    conn: sqlite3.Connection,
+    slideshow_id: int,
+    visual_style_json: str | None = None,
+    cta_text: str | None = None,
+) -> None:
+    """Update visual_style and cta_text on a slideshow record.
+
+    Does NOT commit — the caller should commit after all slideshow operations.
+    """
+    conn.execute(
+        "UPDATE slideshows SET visual_style = ?, cta_text = ? WHERE id = ?",
+        (visual_style_json, cta_text, slideshow_id),
+    )
 
 
 def mark_slideshow_posted(conn: sqlite3.Connection, slideshow_id: int, postiz_post_id: str) -> None:

@@ -1,12 +1,16 @@
 """Visual style palettes and prompt composition for scroll-stopping image generation.
 
 Centralises all creative direction for slideshow images — variety palettes,
-composition rules, negative guidance, and deterministic style selection.
+composition rules, negative guidance, deterministic style selection, and
+weight-biased style selection for the analytics intelligence loop.
 """
 
 import hashlib
+import logging
 import random
 from typing import TypedDict
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Type definitions
@@ -269,6 +273,10 @@ def select_slideshow_style(city: str, date_str: str) -> SlideshowStyle:
 
     Seeded from *city + date_str* so re-runs on the same day produce the same
     style, but different cities or different dates get variety.
+
+    Note: This is the deterministic (unweighted) version.  For weight-biased
+    selection from the analytics intelligence loop, use
+    :func:`select_weighted_style` instead.
     """
     seed = int(hashlib.sha256(f"{city.lower().strip()}:{date_str}".encode()).hexdigest(), 16)
     rng = random.Random(seed)
@@ -284,6 +292,57 @@ def select_slideshow_style(city: str, date_str: str) -> SlideshowStyle:
             return style
 
     # Fallback: safe combination
+    return {
+        "time_of_day": TIME_OF_DAY[0],  # golden_hour
+        "weather": WEATHER_MOOD[1],  # clear
+        "perspective": PERSPECTIVE[0],  # street_level
+        "color_mood": COLOR_MOOD[0],  # warm_analog
+    }
+
+
+def select_weighted_style(weights: dict[str, dict[str, float]] | None = None) -> SlideshowStyle:
+    """Select a visual style combination biased by performance weights.
+
+    Unlike :func:`select_slideshow_style`, this version does NOT use
+    city/date seeding.  Each call is intentionally random, biased by the
+    per-axis weights from ``performance_weights.json``.
+
+    Args:
+        weights: Nested dict ``{dimension: {value: weight, ...}, ...}``
+            as returned by ``intelligence.read_weights()``.  If *None* or
+            empty, all options are equally likely.
+
+    Returns:
+        A :class:`SlideshowStyle` dict with compatible axis selections.
+    """
+    if weights is None:
+        weights = {}
+
+    def _pick_axis(axis_options: list[StyleOption], dim_key: str) -> StyleOption:
+        dim_weights = weights.get(dim_key, {})
+        names = [opt["name"] for opt in axis_options]
+        w = [dim_weights.get(n, 1.0) for n in names]
+        return random.choices(axis_options, weights=w, k=1)[0]
+
+    for _ in range(_MAX_REROLLS):
+        style: SlideshowStyle = {
+            "time_of_day": _pick_axis(TIME_OF_DAY, "time_of_day"),
+            "weather": _pick_axis(WEATHER_MOOD, "weather"),
+            "perspective": _pick_axis(PERSPECTIVE, "perspective"),
+            "color_mood": _pick_axis(COLOR_MOOD, "color_mood"),
+        }
+        if _is_compatible(style):
+            log.debug(
+                "Weighted style selected: %s + %s + %s + %s",
+                style["time_of_day"]["name"],
+                style["weather"]["name"],
+                style["perspective"]["name"],
+                style["color_mood"]["name"],
+            )
+            return style
+
+    # Fallback: safe combination
+    log.warning("Max rerolls reached in select_weighted_style, using fallback")
     return {
         "time_of_day": TIME_OF_DAY[0],  # golden_hour
         "weather": WEATHER_MOOD[1],  # clear
