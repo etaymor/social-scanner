@@ -115,6 +115,13 @@ def init_db(conn: sqlite3.Connection) -> None:
             if "duplicate column name" not in str(e):
                 raise
 
+    # Migration — add cover_url to raw_posts for visual OCR
+    try:
+        conn.execute("ALTER TABLE raw_posts ADD COLUMN cover_url TEXT DEFAULT NULL")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" not in str(e):
+            raise
+
     # Slideshow tracking tables
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS slideshows (
@@ -175,10 +182,14 @@ def reset_city(conn: sqlite3.Connection, city_id: int) -> None:
 
 
 def insert_hashtags(
-    conn: sqlite3.Connection, city_id: int, tags: list[str], category: str | None = None
+    conn: sqlite3.Connection,
+    city_id: int,
+    tags: list[str],
+    category: str | None = None,
+    platforms: tuple[str, ...] = ("tiktok",),
 ) -> None:
     for tag in tags:
-        for platform in ("tiktok", "instagram"):
+        for platform in platforms:
             conn.execute(
                 "INSERT OR IGNORE INTO hashtags (city_id, tag, platform, category) VALUES (?, ?, ?, ?)",
                 (city_id, tag, platform, category),
@@ -208,6 +219,20 @@ def update_hashtag_status(conn: sqlite3.Connection, hashtag_id: int, status: str
     conn.commit()
 
 
+def bulk_update_hashtag_status(
+    conn: sqlite3.Connection, hashtag_ids: list[int], status: str
+) -> None:
+    """Update scrape_status for multiple hashtags in a single transaction."""
+    if not hashtag_ids:
+        return
+    placeholders = ",".join("?" * len(hashtag_ids))
+    conn.execute(
+        f"UPDATE hashtags SET scrape_status = ? WHERE id IN ({placeholders})",
+        [status, *hashtag_ids],
+    )
+    conn.commit()
+
+
 # --- Post helpers ---
 
 
@@ -223,8 +248,8 @@ def insert_post(
         cur = conn.execute(
             """INSERT OR IGNORE INTO raw_posts
                (city_id, platform, post_id, caption, likes, comments, shares,
-                saves, views, url, author, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                saves, views, url, author, created_at, cover_url)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 city_id,
                 platform,
@@ -238,6 +263,7 @@ def insert_post(
                 post_data.get("url"),
                 post_data.get("author"),
                 post_data.get("created_at"),
+                post_data.get("cover_url"),
             ),
         )
         if cur.rowcount == 0:

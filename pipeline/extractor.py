@@ -14,11 +14,17 @@ SYSTEM_PROMPT = """\
 You are extracting specific place names from social media captions about {city_name}.
 
 Rules:
-- Only extract places with actual names (not "this cute cafe" without a name)
+- Extract ALL named places, businesses, venues, and locations mentioned in each caption
+- Include places from: caption text, 📍 location tags, 🔤 on-screen text (OCR from video/image), addresses, and any other location references
+- Extract EVERY place mentioned, even if multiple places appear in a single caption (e.g. "Top 5 restaurants" lists)
 - Include the neighborhood/area if mentioned alongside the place
 - Classify each place by type
 - Assign each place a category from this list: food_and_drink, places_to_stay, sights_and_attractions, nightlife, shopping, outdoors_and_nature, arts_and_culture, activities_and_experiences
-- Skip generic city landmarks unless the caption frames them in a non-obvious way
+- DO extract specific neighborhoods, streets, markets, and districts by name
+- DO extract places even if only a business name is given (e.g. "@CafeBlue" → "Cafe Blue")
+- DO extract places from numbered lists (e.g. "1. Sushi Dai 2. Ramen Street" → extract both)
+- DO NOT extract the city name itself ("{city_name}") or the country name as a place
+- Skip only truly generic references without any name (e.g. "this cute cafe", "a random bar")
 
 Valid types: restaurant, cafe, bar, club, market, neighborhood, viewpoint, park, museum, gallery, shop, activity, street, hotel, hostel, tour, class, beach, temple, spa, brewery, lounge, bakery, garden, theater, monument, boutique, trail, workshop, other
 
@@ -109,6 +115,9 @@ def _process_batch(
                 continue
             name = place.get("name", "").strip()
             if not name:
+                continue
+            # Skip the city name itself — it's not a "place"
+            if name.lower() == city_name.lower():
                 continue
             place_type = _validate_place_type(place.get("type", "other"))
             category = _validate_category(place.get("category"), place_type)

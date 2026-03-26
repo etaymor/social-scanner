@@ -117,6 +117,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip Apify scraping, run extraction on existing data",
     )
     parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="Reset failed hashtags to pending so they get re-scraped",
+    )
+    parser.add_argument(
         "--reset", action="store_true", help="Clear all data for this city before running"
     )
     parser.add_argument("--export-csv", action="store_true", help="Export results to CSV file")
@@ -156,6 +161,16 @@ def main() -> None:
         )
         conn.commit()
 
+        # Retry failed hashtags if requested
+        if args.retry_failed:
+            reset_count = conn.execute(
+                "UPDATE hashtags SET scrape_status = 'pending' WHERE city_id = ? AND scrape_status = 'failed'",
+                (city_id,),
+            ).rowcount
+            conn.commit()
+            if reset_count:
+                log.info("Reset %d failed hashtags to pending for retry", reset_count)
+
         # Step 1: Hashtag Generation
         from pipeline.hashtags import generate_hashtags
 
@@ -179,6 +194,12 @@ def main() -> None:
             scrape_posts(conn, city_id, city_name, max_posts=args.max_posts)
         else:
             log.info("Step 2/5: Skipping scraping (--skip-scrape)")
+
+        # Step 2.5: Visual OCR — extract on-screen text from cover images
+        from pipeline.ocr import extract_cover_text
+
+        log.info("Step 2.5: Running visual OCR on cover images...")
+        extract_cover_text(conn, city_id, city_name)
 
         # Step 3: LLM Place Extraction
         from pipeline.extractor import extract_places
