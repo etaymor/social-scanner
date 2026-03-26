@@ -73,13 +73,13 @@ Discover trending, non-obvious places in any city by scraping TikTok and Instagr
    OPENROUTER_MODEL=anthropic/claude-sonnet-4
    ```
 
-   | Variable | Required | Default | Description |
-   |---|---|---|---|
-   | `APIFY_API_TOKEN` | Yes | — | Your Apify API token |
-   | `OPENROUTER_API_KEY` | Yes | — | Your OpenRouter API key |
-   | `OPENROUTER_MODEL` | No | `anthropic/claude-sonnet-4` | LLM model to use via OpenRouter |
-   | `DB_PATH` | No | `places.db` | Path to the SQLite database file |
-   | `FLASK_DEBUG` | No | `false` | Set to `true` for Flask debug mode |
+   | Variable             | Required | Default                     | Description                        |
+   | -------------------- | -------- | --------------------------- | ---------------------------------- |
+   | `APIFY_API_TOKEN`    | Yes      | —                           | Your Apify API token               |
+   | `OPENROUTER_API_KEY` | Yes      | —                           | Your OpenRouter API key            |
+   | `OPENROUTER_MODEL`   | No       | `anthropic/claude-sonnet-4` | LLM model to use via OpenRouter    |
+   | `DB_PATH`            | No       | `places.db`                 | Path to the SQLite database file   |
+   | `FLASK_DEBUG`        | No       | `false`                     | Set to `true` for Flask debug mode |
 
 ## Running the Pipeline
 
@@ -97,16 +97,16 @@ python discover.py --city "Istanbul"
 python discover.py --city "Istanbul" [OPTIONS]
 ```
 
-| Flag | Description |
-|---|---|
-| `--city CITY` | **(required)** City name to research |
+| Flag                  | Description                                                  |
+| --------------------- | ------------------------------------------------------------ |
+| `--city CITY`         | **(required)** City name to research                         |
 | `--category CATEGORY` | Focus on a specific category (see [Categories](#categories)) |
-| `--max-posts N` | Max posts per hashtag per platform (default: 100) |
-| `--skip-scrape` | Skip Apify scraping, re-run extraction on existing data |
-| `--reset` | Clear all data for this city before running |
-| `--export-csv` | Export results to a CSV file |
-| `--verbose` | Debug-level logging |
-| `--quiet` | Minimal output (warnings and errors only) |
+| `--max-posts N`       | Max posts per hashtag per platform (default: 100)            |
+| `--skip-scrape`       | Skip Apify scraping, re-run extraction on existing data      |
+| `--reset`             | Clear all data for this city before running                  |
+| `--export-csv`        | Export results to a CSV file                                 |
+| `--verbose`           | Debug-level logging                                          |
+| `--quiet`             | Minimal output (warnings and errors only)                    |
 
 ### Examples
 
@@ -140,6 +140,7 @@ python dashboard.py
 Open **http://localhost:5555** in your browser.
 
 Dashboard features:
+
 - Switch between cities
 - Filter by category or place type
 - Search places by name
@@ -232,16 +233,16 @@ The pipeline runs 5 sequential steps, each building on the previous:
 
 The pipeline supports 8 place categories. Use `--category` to focus discovery on one:
 
-| Category key | Label | Place types |
-|---|---|---|
-| `food_and_drink` | Food & Drink | restaurant, cafe, bakery |
-| `places_to_stay` | Places to Stay | hotel, hostel |
-| `sights_and_attractions` | Sights & Attractions | viewpoint, neighborhood, street, monument, temple |
-| `nightlife` | Nightlife | bar, club, lounge, brewery |
-| `shopping` | Shopping | shop, market, boutique |
-| `outdoors_and_nature` | Outdoors & Nature | park, beach, garden, trail |
-| `arts_and_culture` | Arts & Culture | museum, gallery, theater |
-| `activities_and_experiences` | Activities & Experiences | activity, tour, class, spa, workshop |
+| Category key                 | Label                    | Place types                                       |
+| ---------------------------- | ------------------------ | ------------------------------------------------- |
+| `food_and_drink`             | Food & Drink             | restaurant, cafe, bakery                          |
+| `places_to_stay`             | Places to Stay           | hotel, hostel                                     |
+| `sights_and_attractions`     | Sights & Attractions     | viewpoint, neighborhood, street, monument, temple |
+| `nightlife`                  | Nightlife                | bar, club, lounge, brewery                        |
+| `shopping`                   | Shopping                 | shop, market, boutique                            |
+| `outdoors_and_nature`        | Outdoors & Nature        | park, beach, garden, trail                        |
+| `arts_and_culture`           | Arts & Culture           | museum, gallery, theater                          |
+| `activities_and_experiences` | Activities & Experiences | activity, tour, class, spa, workshop              |
 
 ## API Endpoints
 
@@ -251,12 +252,12 @@ The dashboard also exposes a JSON API:
 
 Returns paginated place data.
 
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `city_id` | int | — | City ID (required) |
-| `page` | int | 1 | Page number |
-| `per_page` | int | 50 | Results per page (max 500) |
-| `category` | string | — | Filter by category key |
+| Parameter  | Type   | Default | Description                |
+| ---------- | ------ | ------- | -------------------------- |
+| `city_id`  | int    | —       | City ID (required)         |
+| `page`     | int    | 1       | Page number                |
+| `per_page` | int    | 50      | Results per page (max 500) |
+| `category` | string | —       | Filter by category key     |
 
 **Response:**
 
@@ -283,6 +284,7 @@ Returns paginated place data.
 The application uses SQLite (`places.db` by default). The database is automatically created and initialized on first run.
 
 **Tables:**
+
 - `cities` — City records
 - `hashtags` — Generated hashtags per platform
 - `raw_posts` — Scraped posts with engagement metrics
@@ -294,10 +296,10 @@ The database location can be changed with the `DB_PATH` environment variable.
 
 ## Costs
 
-| Service | Estimated cost |
-|---|---|
-| Apify | ~$2 per 1,000 results. A typical city run (15 hashtags x 100 posts x 2 platforms) costs ~$6 |
-| OpenRouter | Depends on model. ~50 LLM calls per city for extraction, filtering, and dedup |
+| Service    | Estimated cost                                                                              |
+| ---------- | ------------------------------------------------------------------------------------------- |
+| Apify      | ~$2 per 1,000 results. A typical city run (15 hashtags x 100 posts x 2 platforms) costs ~$6 |
+| OpenRouter | Depends on model. ~50 LLM calls per city for extraction, filtering, and dedup               |
 
 Use `--max-posts` and `--skip-scrape` to manage Apify costs during development.
 
@@ -314,6 +316,7 @@ Use `--reset` to clear all data for a city before running.
 
 **Tests failing?**
 Make sure your virtual environment is activated and dependencies are installed:
+
 ```bash
 source .venv/bin/activate
 pip install -r requirements.txt
