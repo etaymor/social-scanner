@@ -328,8 +328,8 @@ class TestAttributeConversions:
         """Helper to insert a published slideshow and return its id."""
         cur = conn.execute(
             """INSERT INTO slideshows
-               (city_id, category, format, hook_text, slide_count, output_dir, posted_at)
-               VALUES (?, 'food_and_drink', 'listicle', 'Test hook', 5, '/tmp/test', ?)""",
+               (city_id, category, format, hook_text, slide_count, output_dir, posted_at, publish_status)
+               VALUES (?, 'food_and_drink', 'listicle', 'Test hook', 5, '/tmp/test', ?, 'published')""",
             (city_id, posted_at_str),
         )
         return cur.lastrowid

@@ -200,6 +200,13 @@ def init_db(conn: sqlite3.Connection) -> None:
             revenue REAL DEFAULT 0.0
         );
 
+        CREATE TABLE IF NOT EXISTS trial_attributions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trial_id TEXT UNIQUE NOT NULL,
+            slideshow_id INTEGER NOT NULL REFERENCES slideshows(id) ON DELETE CASCADE,
+            attributed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE TABLE IF NOT EXISTS slideshow_performance (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             slideshow_id INTEGER NOT NULL REFERENCES slideshows(id) ON DELETE CASCADE,

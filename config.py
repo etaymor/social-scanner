@@ -124,7 +124,6 @@ REVENUECAT_BASE_URL = "https://api.revenuecat.com/v2"
 # Analytics intelligence loop
 PERFORMANCE_WEIGHTS_PATH = Path("performance_weights.json")
 ANALYTICS_LOOKBACK_DAYS = 3
-ATTRIBUTION_WINDOW_HOURS = 72
 STALE_DRAFT_HOURS = 72
 POST_MATURATION_HOURS = 48
 MIN_POSTS_FOR_WEIGHT = 3

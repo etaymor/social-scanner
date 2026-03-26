@@ -7,7 +7,6 @@ to ``performance_weights.json`` atomically (tmp + rename).
 
 import json
 import logging
-import math
 import os
 import sqlite3
 import statistics
@@ -135,7 +134,8 @@ def evaluate_slideshows(conn: sqlite3.Connection) -> int:
               SELECT 1 FROM slideshow_analytics sa WHERE sa.slideshow_id = s.id
           )
           AND NOT EXISTS (
-              SELECT 1 FROM slideshow_performance sp WHERE sp.slideshow_id = s.id
+              SELECT 1 FROM slideshow_performance sp
+              WHERE sp.slideshow_id = s.id AND sp.decision_tag IS NOT NULL
           )
         """,
         (f"-{maturation} hours",),
@@ -367,27 +367,34 @@ def compute_dimension_weights(
         (f"-{decay_days} days", f"-{config.POST_MATURATION_HOURS} hours"),
     ).fetchall()
 
-    # Also fetch virality band for each slideshow
+    # Batch fetch virality bands for all slideshows in one query
     virality_map: dict[int, str] = {}
-    for row in rows:
-        sid = row["slideshow_id"]
-        if sid not in virality_map:
-            vr = conn.execute(
-                """
-                SELECT AVG(p.virality_score) as avg_v
-                FROM slideshow_places sp_link
-                JOIN places p ON p.id = sp_link.place_id
-                WHERE sp_link.slideshow_id = ?
-                """,
-                (sid,),
-            ).fetchone()
-            score = vr["avg_v"] if vr and vr["avg_v"] is not None else 50.0
-            virality_map[sid] = _virality_band(score)
+    slideshow_ids = list({row["slideshow_id"] for row in rows})
+    if slideshow_ids:
+        placeholders = ",".join("?" * len(slideshow_ids))
+        vr_rows = conn.execute(
+            f"""
+            SELECT sp_link.slideshow_id, AVG(p.virality_score) as avg_v
+            FROM slideshow_places sp_link
+            JOIN places p ON p.id = sp_link.place_id
+            WHERE sp_link.slideshow_id IN ({placeholders})
+            GROUP BY sp_link.slideshow_id
+            """,
+            slideshow_ids,
+        ).fetchall()
+        for vr in vr_rows:
+            score = vr["avg_v"] if vr["avg_v"] is not None else 50.0
+            virality_map[vr["slideshow_id"]] = _virality_band(score)
+        # Default for slideshows with no linked places
+        for sid in slideshow_ids:
+            if sid not in virality_map:
+                virality_map[sid] = _virality_band(50.0)
 
-    # Build per-dimension groups: {dim: {value: [(score, decay_weight)]}}
+    # Build per-dimension groups and overall scores in a single pass
     groups: dict[str, dict[str, list[tuple[float, float]]]] = {
         d: {} for d in DIMENSIONS
     }
+    all_scores: list[tuple[float, float]] = []
 
     for row in rows:
         score = row["composite_score"] or 0.0
@@ -395,6 +402,8 @@ def compute_dimension_weights(
         posted_at = row["posted_at"]
         days = _days_since(posted_at) if posted_at else 0.0
         decay_w = (decay_factor ** days) * confidence
+
+        all_scores.append((score, decay_w))
 
         # Dimension values for this slideshow
         dim_values: dict[str, str | None] = {
@@ -415,16 +424,6 @@ def compute_dimension_weights(
             if val is None or val == "":
                 continue
             groups[dim].setdefault(val, []).append((score, decay_w))
-
-    # Compute the overall decay-weighted average composite score
-    all_scores: list[tuple[float, float]] = []
-    for row in rows:
-        score = row["composite_score"] or 0.0
-        confidence = row["views_confidence"] if row["views_confidence"] is not None else 1.0
-        posted_at = row["posted_at"]
-        days = _days_since(posted_at) if posted_at else 0.0
-        decay_w = (decay_factor ** days) * confidence
-        all_scores.append((score, decay_w))
 
     total_weight_sum = sum(w for _, w in all_scores)
     overall_avg = (

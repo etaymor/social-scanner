@@ -190,7 +190,7 @@ class TestFullReport:
             mock_intel.compute_dimension_weights.return_value = {d: {} for d in DIMENSIONS}
             mock_intel.write_weights.return_value = None
 
-            phase3 = run_phase3(conn, phase2)
+            phase3 = run_phase3(conn)
 
         report = generate_report(conn, 3, phase1, phase2, phase3, report_date)
 
@@ -371,7 +371,7 @@ class TestPartialReport:
         phase2 = {"rc_configured": False}
         with mock.patch("daily_report.intelligence") as mock_intel:
             mock_intel.evaluate_slideshows.side_effect = RuntimeError("DB locked")
-            result = run_phase3(conn, phase2)
+            result = run_phase3(conn)
 
         assert result["error"] is not None
         assert "DB locked" in result["error"]
@@ -772,7 +772,7 @@ class TestPhase3Integration:
             }
             mock_intel.write_weights.return_value = None
 
-            result = run_phase3(conn, phase2)
+            result = run_phase3(conn)
 
         assert result["circuit_breaker_tripped"] is True
         # New weights should all be empty dicts (reset)
@@ -803,7 +803,7 @@ class TestPhase3Integration:
             mock_intel.compute_dimension_weights.return_value = computed_weights
             mock_intel.write_weights.return_value = None
 
-            result = run_phase3(conn, phase2)
+            result = run_phase3(conn)
 
         assert result["circuit_breaker_tripped"] is False
         assert result["new_weights"]["category"]["food_and_drink"] == 1.2

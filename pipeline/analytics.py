@@ -23,7 +23,7 @@ RETRY_BASE_DELAY = 2  # seconds
 
 
 class AnalyticsError(Exception):
-    """Retryable analytics error."""
+    """Non-retryable analytics client error."""
 
     pass
 
@@ -37,12 +37,6 @@ class AnalyticsAuthError(AnalyticsError):
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-_HEADERS = {
-    "Authorization": f"Bearer {config.POSTIZ_API_KEY}",
-    "Content-Type": "application/json",
-}
-
 
 def _get_headers() -> dict[str, str]:
     """Return fresh Postiz headers (re-reads config for testability)."""
@@ -370,9 +364,19 @@ def fetch_post_analytics(conn: sqlite3.Connection, days: int | None = None) -> i
                 empty_views_slideshows.append(slideshow_id)
 
             conn.execute(
-                "INSERT OR REPLACE INTO slideshow_analytics "
-                "(slideshow_id, fetched_at, views, likes, comments, shares, saves, views_estimated) "
-                "VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?)",
+                """INSERT INTO slideshow_analytics
+                   (slideshow_id, fetched_at, views, likes, comments, shares, saves, views_estimated)
+                   VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(slideshow_id, DATE(fetched_at)) DO UPDATE SET
+                     views = MAX(excluded.views, slideshow_analytics.views),
+                     likes = excluded.likes,
+                     comments = excluded.comments,
+                     shares = excluded.shares,
+                     saves = excluded.saves,
+                     views_estimated = CASE
+                       WHEN excluded.views > slideshow_analytics.views THEN excluded.views_estimated
+                       ELSE slideshow_analytics.views_estimated
+                     END""",
                 (slideshow_id, views, likes, comments, shares, saves, False),
             )
             upserted += 1
@@ -418,7 +422,7 @@ def _apply_delta_fallback(
     for sid in slideshow_ids:
         conn.execute(
             "UPDATE slideshow_analytics SET views = ?, views_estimated = ? "
-            "WHERE slideshow_id = ? AND DATE(fetched_at) = DATE('now')",
+            "WHERE id = (SELECT id FROM slideshow_analytics WHERE slideshow_id = ? ORDER BY fetched_at DESC LIMIT 1)",
             (per_post, True, sid),
         )
 

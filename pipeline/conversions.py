@@ -15,19 +15,6 @@ log = logging.getLogger(__name__)
 MAX_RETRIES = 3
 RETRY_BASE_DELAY = 2  # seconds
 
-# Metric IDs we care about from the overview endpoint
-OVERVIEW_METRIC_IDS = frozenset(
-    {
-        "mrr",
-        "active_trials",
-        "active_subscriptions",
-        "active_users",
-        "new_customers",
-        "revenue",
-    }
-)
-
-
 # ---------------------------------------------------------------------------
 # Error hierarchy
 # ---------------------------------------------------------------------------
@@ -41,6 +28,12 @@ class RevenueCatError(Exception):
 
 class RevenueCatAuthError(RevenueCatError):
     """Non-retryable auth failure (401/403)."""
+
+    pass
+
+
+class RevenueCatClientError(RevenueCatError):
+    """Non-retryable client error (400/404/422 etc.)."""
 
     pass
 
@@ -85,7 +78,7 @@ class RevenueCatClient:
                     f"RevenueCat rate-limited (HTTP 429)"
                 )
             if 400 <= resp.status_code < 500:
-                raise RevenueCatAuthError(
+                raise RevenueCatClientError(
                     f"RevenueCat client error (HTTP {resp.status_code}): {resp.text[:200]}"
                 )
             resp.raise_for_status()
@@ -95,7 +88,7 @@ class RevenueCatClient:
             _do_get,
             max_retries=MAX_RETRIES,
             base_delay=RETRY_BASE_DELAY,
-            non_retryable=(RevenueCatAuthError,),
+            non_retryable=(RevenueCatAuthError, RevenueCatClientError),
         )
 
     # -- public API methods -----------------------------------------------
@@ -278,11 +271,24 @@ def attribute_conversions(conn: sqlite3.Connection, days: int) -> int:
 
         starts_at_str = starts_at.strftime("%Y-%m-%d %H:%M:%S")
 
+        trial_id = trial.get("id")
+        if not trial_id:
+            continue
+
+        # Deduplicate: skip trials already attributed
+        already = conn.execute(
+            "SELECT 1 FROM trial_attributions WHERE trial_id = ?",
+            (trial_id,),
+        ).fetchone()
+        if already:
+            continue
+
         # Find the most recent published slideshow posted before this trial
         row = conn.execute(
             """SELECT id FROM slideshows
                WHERE posted_at IS NOT NULL
                  AND posted_at < ?
+                 AND publish_status = 'published'
                ORDER BY posted_at DESC
                LIMIT 1""",
             (starts_at_str,),
@@ -292,6 +298,12 @@ def attribute_conversions(conn: sqlite3.Connection, days: int) -> int:
             continue
 
         slideshow_id = row["id"]
+
+        # Record the attribution (UNIQUE on trial_id prevents duplicates)
+        conn.execute(
+            "INSERT OR IGNORE INTO trial_attributions (trial_id, slideshow_id) VALUES (?, ?)",
+            (trial_id, slideshow_id),
+        )
 
         # Upsert into slideshow_performance — increment conversions
         existing = conn.execute(

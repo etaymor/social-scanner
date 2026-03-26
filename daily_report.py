@@ -146,7 +146,7 @@ def run_phase2(conn, days: int) -> dict:
     return result
 
 
-def run_phase3(conn, phase2_data: dict) -> dict:
+def run_phase3(conn) -> dict:
     """Phase 3: Intelligence computation and report data. Commits on success."""
     result = {
         "evaluated": 0,
@@ -227,8 +227,14 @@ def _query_slideshow_table(conn, days: int) -> list[dict]:
                sp.views_at_48h
         FROM slideshows s
         LEFT JOIN cities c ON c.id = s.city_id
-        LEFT JOIN slideshow_analytics sa ON sa.slideshow_id = s.id
-        LEFT JOIN slideshow_performance sp ON sp.slideshow_id = s.id
+        LEFT JOIN slideshow_analytics sa ON sa.id = (
+            SELECT id FROM slideshow_analytics
+            WHERE slideshow_id = s.id ORDER BY fetched_at DESC LIMIT 1
+        )
+        LEFT JOIN slideshow_performance sp ON sp.id = (
+            SELECT id FROM slideshow_performance
+            WHERE slideshow_id = s.id ORDER BY evaluated_at DESC LIMIT 1
+        )
         WHERE s.posted_at IS NOT NULL
           AND s.posted_at >= ?
         ORDER BY s.posted_at DESC
@@ -304,8 +310,11 @@ def _query_attribution_table(conn, days: int) -> list[dict]:
         """
         SELECT s.id, s.hook_text, s.category, c.name as city_name,
                sp.conversions, sp.views_at_48h, sp.conversion_rate
-        FROM slideshow_performance sp
-        JOIN slideshows s ON s.id = sp.slideshow_id
+        FROM slideshows s
+        JOIN slideshow_performance sp ON sp.id = (
+            SELECT id FROM slideshow_performance
+            WHERE slideshow_id = s.id ORDER BY evaluated_at DESC LIMIT 1
+        )
         LEFT JOIN cities c ON c.id = s.city_id
         WHERE sp.conversions > 0
           AND s.posted_at >= ?
@@ -665,7 +674,7 @@ def main() -> None:
 
         # Phase 3: Intelligence
         log.info("Phase 3: Running intelligence computations...")
-        phase3 = run_phase3(conn, phase2)
+        phase3 = run_phase3(conn)
 
         # Generate report
         log.info("Generating report...")
