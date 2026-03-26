@@ -122,6 +122,13 @@ def init_db(conn: sqlite3.Connection) -> None:
         if "duplicate column name" not in str(e):
             raise
 
+    # Migration — add hidden column for soft-delete / blocking places
+    try:
+        conn.execute("ALTER TABLE places ADD COLUMN hidden BOOLEAN DEFAULT FALSE")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" not in str(e):
+            raise
+
     # Slideshow tracking tables
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS slideshows (
@@ -323,12 +330,19 @@ def upsert_place(
     if not name:
         return -1
     row = conn.execute(
-        "SELECT id, mention_count FROM places WHERE city_id = ? AND name = ? COLLATE NOCASE",
+        "SELECT id, mention_count, hidden FROM places WHERE city_id = ? AND name = ? COLLATE NOCASE",
         (city_id, name),
     ).fetchone()
 
     if row:
         place_id = row["id"]
+        # Skip updating hidden places — they stay blocked
+        if row["hidden"]:
+            conn.execute(
+                "INSERT OR IGNORE INTO place_posts (place_id, post_id) VALUES (?, ?)",
+                (place_id, post_id),
+            )
+            return place_id
         conn.execute(
             "UPDATE places SET mention_count = mention_count + 1, category = COALESCE(?, category) WHERE id = ?",
             (category, place_id),
@@ -360,10 +374,13 @@ def get_places_page(
     page: int = 1,
     per_page: int = 50,
     category: str | None = None,
+    show_hidden: bool = False,
 ) -> tuple[list[sqlite3.Row], int]:
     """Return a page of places and total count for pagination."""
     where = "WHERE city_id = ?"
     params: list = [city_id]
+    if not show_hidden:
+        where += " AND hidden = FALSE"
     if category:
         where += " AND category = ?"
         params.append(category)
@@ -385,6 +402,30 @@ def get_place_post_ids(conn: sqlite3.Connection, place_id: int) -> list[int]:
         (place_id,),
     ).fetchall()
     return [r["post_id"] for r in rows]
+
+
+def toggle_place_hidden(conn: sqlite3.Connection, place_id: int) -> bool:
+    """Toggle the hidden flag on a place. Returns the new hidden state."""
+    row = conn.execute("SELECT hidden FROM places WHERE id = ?", (place_id,)).fetchone()
+    if not row:
+        raise ValueError(f"Place {place_id} not found")
+    new_state = not row["hidden"]
+    conn.execute("UPDATE places SET hidden = ? WHERE id = ?", (new_state, place_id))
+    conn.commit()
+    return new_state
+
+
+def get_place_source_posts(conn: sqlite3.Connection, place_id: int) -> list[sqlite3.Row]:
+    """Return raw_posts linked to a place, ordered by views DESC."""
+    return conn.execute(
+        """SELECT rp.url, rp.platform, rp.author, rp.likes, rp.comments,
+                  rp.shares, rp.saves, rp.views, rp.created_at
+           FROM raw_posts rp
+           JOIN place_posts pp ON pp.post_id = rp.id
+           WHERE pp.place_id = ?
+           ORDER BY rp.views DESC""",
+        (place_id,),
+    ).fetchall()
 
 
 def get_posts_by_ids(conn: sqlite3.Connection, post_ids: list[int]) -> list[sqlite3.Row]:
@@ -462,7 +503,11 @@ def get_city_stats(conn: sqlite3.Connection, city_id: int) -> dict:
         "SELECT COUNT(*) as cnt FROM places WHERE city_id = ? AND is_tourist_trap = TRUE",
         (city_id,),
     ).fetchone()["cnt"]
-    return {"posts": posts, "hashtags": hashtags, "places": places, "tourist_traps": traps}
+    hidden = conn.execute(
+        "SELECT COUNT(*) as cnt FROM places WHERE city_id = ? AND hidden = TRUE",
+        (city_id,),
+    ).fetchone()["cnt"]
+    return {"posts": posts, "hashtags": hashtags, "places": places, "tourist_traps": traps, "hidden": hidden}
 
 
 # --- Slideshow helpers ---
@@ -512,7 +557,7 @@ def get_available_places(
     the last PLACE_REUSE_COOLDOWN_DAYS days.  If category is provided, filter
     by category.
     """
-    where = "WHERE p.city_id = ? AND p.is_tourist_trap = FALSE"
+    where = "WHERE p.city_id = ? AND p.is_tourist_trap = FALSE AND p.hidden = FALSE"
     params: list = [city_id]
 
     if category:

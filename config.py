@@ -40,6 +40,9 @@ WEIGHT_SHARES = 4.0
 WEIGHT_COMMENTS = 2.0
 WEIGHT_LIKES = 1.0
 
+# Google Places API (real photo sourcing — falls back to AI if unset)
+GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY", "")
+
 # Gemini (image generation via OpenRouter)
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "google/gemini-3.1-flash-image-preview")
 GEMINI_MAX_RETRIES = 2

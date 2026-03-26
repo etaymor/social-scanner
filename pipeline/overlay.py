@@ -208,19 +208,11 @@ def add_location_overlay(image: Image.Image, slide_text: LocationSlideText) -> I
         _draw_text_with_stroke(draw, (x, y), line, name_font, stroke_name, anchor="mt")
         y += line_height_name
 
-    # Draw neighborhood below name
+    # Draw neighborhood below name (skip if it matches the place name)
     y += gap
-    if slide_text.neighborhood:
+    if slide_text.neighborhood and slide_text.neighborhood.lower() != slide_text.name.lower():
         _draw_text_with_stroke(
             draw, (x, y), slide_text.neighborhood, neigh_font, stroke_neigh, anchor="mt"
-        )
-
-    # Draw slide number in top-left (within safe zone)
-    if slide_text.number:
-        num_x = img.width * 0.05
-        num_y = img.height * 0.12
-        _draw_text_with_stroke(
-            draw, (num_x, num_y), slide_text.number, number_font, stroke_num, anchor="lt"
         )
 
     return img

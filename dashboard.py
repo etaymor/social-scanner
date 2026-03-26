@@ -35,6 +35,7 @@ def index():
         category_filter = request.args.get("category", "")
         if category_filter and category_filter not in VALID_CATEGORIES:
             category_filter = ""
+        show_hidden = request.args.get("show_hidden", "").lower() == "true"
 
         if city_id:
             city_row = conn.execute("SELECT * FROM cities WHERE id = ?", (city_id,)).fetchone()
@@ -47,6 +48,7 @@ def index():
                     page,
                     per_page,
                     category=category_filter or None,
+                    show_hidden=show_hidden,
                 )
                 total_pages = math.ceil(total_places / per_page) if total_places else 0
                 place_types = sorted(
@@ -83,6 +85,7 @@ def index():
         type_filter=type_filter,
         trap_filter=trap_filter,
         category_filter=category_filter,
+        show_hidden=show_hidden,
         search=search,
         page=page,
         total_pages=total_pages,
@@ -106,6 +109,31 @@ def api_places():
         places, total = db.get_places_page(conn, city_id, page, per_page, category=category)
         result = [dict(p) for p in places]
         return jsonify({"places": result, "total": total, "page": page, "per_page": per_page})
+    finally:
+        conn.close()
+
+
+@app.route("/api/places/<int:place_id>/hide", methods=["POST"])
+def api_toggle_hide(place_id):
+    """Toggle hidden status for a place."""
+    conn = db.get_connection()
+    try:
+        new_state = db.toggle_place_hidden(conn, place_id)
+        return jsonify({"id": place_id, "hidden": new_state})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    finally:
+        conn.close()
+
+
+@app.route("/api/places/<int:place_id>/posts")
+def api_place_posts(place_id):
+    """Return source posts for a place."""
+    conn = db.get_connection()
+    try:
+        posts = db.get_place_source_posts(conn, place_id)
+        result = [dict(p) for p in posts]
+        return jsonify({"place_id": place_id, "posts": result})
     finally:
         conn.close()
 

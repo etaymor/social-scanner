@@ -240,7 +240,9 @@ COMPOSITION_RULES = (
 )
 
 NEGATIVE_GUIDANCE = (
-    "No text, no watermarks, no logos, no UI elements, no borders. "
+    "CRITICAL: Do NOT render any text, words, letters, numbers, signs, labels, "
+    "captions, titles, or typography of any kind anywhere in the image. "
+    "No watermarks, no logos, no UI elements, no borders, no signage. "
     "No people looking directly at camera, no posed selfies, no group photos. "
     "No oversaturated HDR look, no AI glow effect, no plastic skin texture. "
     "No symmetrical dead-centre composition, no flat frontal perspective. "

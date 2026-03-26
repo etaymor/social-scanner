@@ -259,10 +259,10 @@ def main() -> None:
                 LocationSlideText(
                     name=pd["name"],
                     neighborhood=pd.get("neighborhood") or "",
-                    number=f"{i}/{slide_count}",
+                    number="",
                 )
             )
-        slides.append(CTASlideText(text="Find more hidden gems\non Atlasi"))
+        slides.append(CTASlideText(text="Save guides like this\ndirectly on Atlasi"))
 
         texts_path = output_dir / "texts.json"
         texts_path.write_text(to_texts_json(slides), encoding="utf-8")

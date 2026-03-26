@@ -18,6 +18,7 @@ from config import (
     GEMINI_MAX_RETRIES,
     GEMINI_MODEL,
     GEMINI_TIMEOUT,
+    GOOGLE_PLACES_API_KEY,
     OPENROUTER_API_KEY,
     OPENROUTER_BASE_URL,
 )
@@ -175,8 +176,25 @@ def generate_image(
 
         if len(image_bytes) > _MAX_IMAGE_SIZE:
             raise GeminiError(f"Decoded image too large: {len(image_bytes)} bytes")
-        if not image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
-            raise GeminiError("Decoded data is not a valid PNG image")
+
+        is_png = image_bytes[:8] == b"\x89PNG\r\n\x1a\n"
+        is_jpeg = image_bytes[:2] == b"\xff\xd8"
+        is_webp = image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP"
+
+        if not (is_png or is_jpeg or is_webp):
+            raise GeminiError("Decoded data is not a valid image (not PNG, JPEG, or WebP)")
+
+        # Convert JPEG/WebP to PNG so downstream pipeline always gets PNG
+        if not is_png:
+            from io import BytesIO
+
+            from PIL import Image as PILImage
+
+            buf = BytesIO(image_bytes)
+            img = PILImage.open(buf)
+            png_buf = BytesIO()
+            img.save(png_buf, format="PNG")
+            image_bytes = png_buf.getvalue()
 
         dest = Path(output_path)
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -188,30 +206,154 @@ def generate_image(
     try:
         return retry_with_backoff(
             _do_generate,
-            max_retries=GEMINI_MAX_RETRIES,
+            max_retries=max(GEMINI_MAX_RETRIES, 3),
             base_delay=_RETRY_BASE_DELAY,
-            non_retryable=(GeminiQuotaError, GeminiError),
+            non_retryable=(GeminiQuotaError,),
         )
     except (GeminiQuotaError, GeminiError):
         raise
     except Exception as e:
-        raise GeminiError(f"Image generation failed after {GEMINI_MAX_RETRIES} retries: {e}") from e
+        raise GeminiError(f"Image generation failed after retries: {e}") from e
 
 
 # ---------------------------------------------------------------------------
 # Slideshow orchestrator
 # ---------------------------------------------------------------------------
 
-_CTA_PROMPT = (
-    "A dreamy flat-lay arrangement on a warm wooden surface: a vintage leather "
-    "journal open to a hand-drawn map with colourful pins, a ceramic coffee cup "
-    "with latte art, a phone face-down showing just a hint of a map on its screen, "
-    "dried wildflowers, a boarding pass, and a pair of sunglasses. Warm morning "
-    "light from the upper left casting soft shadows. Muted warm colour palette, "
-    "shallow depth of field on the edges. The overall feeling is cosy travel "
-    "planning on a lazy morning. No readable text, no brand names visible, "
-    "no UI elements."
-)
+def build_cta_image(
+    city_name: str,
+    place_names: list[str],
+    output_path: Path,
+    hook_image_path: Path | None = None,
+) -> bool:
+    """Build the CTA slide programmatically — no AI generation.
+
+    Creates a clean Atlasi app "Save Place" UI mockup with the actual
+    place names rendered as crisp text using Pillow.
+    """
+    from PIL import Image as PILImage, ImageDraw as PILDraw, ImageFont as PILFont
+
+    W, H = 1080, 1920
+
+    # Colors matching Atlasi brand
+    bg_color = (255, 251, 243)
+    text_dark = (35, 35, 35)
+    text_gray = (120, 120, 120)
+    accent_gold = (232, 185, 56)
+    divider_color = (230, 225, 215)
+
+    img = PILImage.new("RGB", (W, H), bg_color)
+    draw = PILDraw.Draw(img)
+
+    def _font(size: int) -> PILFont.FreeTypeFont | PILFont.ImageFont:
+        for p in [
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ]:
+            try:
+                return PILFont.truetype(p, size)
+            except OSError:
+                continue
+        return PILFont.load_default()
+
+    def _font_bold(size: int) -> PILFont.FreeTypeFont | PILFont.ImageFont:
+        for p in [
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        ]:
+            try:
+                return PILFont.truetype(p, size)
+            except OSError:
+                continue
+        return PILFont.load_default()
+
+    title_font = _font_bold(42)
+    place_font = _font_bold(32)
+    subtitle_font = _font(24)
+    section_font = _font_bold(22)
+    button_font = _font_bold(34)
+    caption_font = _font(22)
+    margin = 40
+
+    y = 60
+
+    # Header
+    draw.text((W // 2, y), "Save Place", font=title_font, fill=text_dark, anchor="mt")
+    draw.text((W - 60, y + 5), "✕", font=_font(36), fill=text_gray, anchor="mt")
+    y += 70
+
+    # TikTok thumbnail
+    thumb_h = 300
+    if hook_image_path and hook_image_path.exists():
+        try:
+            with PILImage.open(hook_image_path) as hook_img:
+                hook_w, hook_h = hook_img.size
+                target_ratio = (W - margin * 2) / thumb_h
+                current_ratio = hook_w / hook_h
+                if current_ratio > target_ratio:
+                    new_w = int(hook_h * target_ratio)
+                    left = (hook_w - new_w) // 2
+                    hook_img = hook_img.crop((left, 0, left + new_w, hook_h))
+                else:
+                    new_h = int(hook_w / target_ratio)
+                    top = (hook_h - new_h) // 2
+                    hook_img = hook_img.crop((0, top, hook_w, top + new_h))
+                hook_img = hook_img.resize((W - margin * 2, thumb_h))
+                img.paste(hook_img, (margin, y))
+        except Exception:
+            draw.rectangle([margin, y, W - margin, y + thumb_h], fill=(60, 60, 60))
+    else:
+        draw.rectangle([margin, y, W - margin, y + thumb_h], fill=(60, 60, 60))
+
+    # TikTok badge
+    draw.rounded_rectangle([margin + 10, y + 10, margin + 120, y + 42], radius=6, fill=(0, 0, 0))
+    draw.text((margin + 65, y + 26), "TikTok", font=_font_bold(18), fill="white", anchor="mm")
+    y += thumb_h + 20
+
+    # Caption
+    draw.text((margin, y), f"Which one would you do first in {city_name}?", font=caption_font, fill=text_dark)
+    y += 35
+    draw.text((margin, y), "Show more ▾", font=_font(20), fill=(70, 130, 180))
+    y += 45
+    draw.line([(margin, y), (W - margin, y)], fill=divider_color, width=1)
+    y += 20
+
+    # Section header
+    draw.text((margin, y), "SELECT PLACES", font=section_font, fill=text_gray)
+    draw.text((W - margin, y), "Clear all", font=_font(22), fill=(70, 130, 180), anchor="rt")
+    y += 50
+
+    # Place list
+    for i, name in enumerate(place_names[:8]):
+        pin_cx, pin_cy = margin + 18, y + 22
+        draw.ellipse([pin_cx - 14, pin_cy - 14, pin_cx + 14, pin_cy + 14], fill=accent_gold)
+        draw.ellipse([pin_cx - 4, pin_cy - 4, pin_cx + 4, pin_cy + 4], fill="white")
+
+        text_x = margin + 50
+        draw.text((text_x, y + 5), name, font=place_font, fill=text_dark)
+        draw.text((text_x, y + 42), city_name, font=subtitle_font, fill=text_gray)
+
+        y += 80
+        if i < len(place_names) - 1:
+            draw.line([(text_x, y - 5), (W - margin, y - 5)], fill=divider_color, width=1)
+
+    # Save button
+    btn_h = 65
+    btn_y = H - 100 - btn_h
+    draw.rounded_rectangle([50, btn_y, W - 50, btn_y + btn_h], radius=32, fill=accent_gold)
+    draw.text(
+        (W // 2, btn_y + btn_h // 2),
+        f"Save {len(place_names)} Places",
+        font=button_font, fill=text_dark, anchor="mm",
+    )
+
+    dest = Path(output_path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    img.save(dest, format="PNG")
+    log.info("CTA image built programmatically: %s", dest)
+    return True
 
 
 def generate_slideshow_images(
@@ -303,59 +445,83 @@ def generate_slideshow_images(
     for i, place in enumerate(places):
         slide_num = i + 2
         place_name = place.get("name", f"place_{i}")
-        raw_prompt = place.get("image_prompt", "")
-        location_suffix = build_location_style_suffix(
-            style, perspective_override=perspectives[i]
-        )
-        full_prompt = f"{raw_prompt}. {location_suffix}"
         slide_path = output_dir / f"slide_{slide_num}_raw.png"
-        prompts[f"slide_{slide_num}_{_slugify(place_name)}"] = full_prompt
 
-        try:
-            if _should_skip(slide_path):
-                log.info("Slide %d (%s): skipped (exists)", slide_num, place_name)
-                skipped += 1
-            else:
-                log.info("Slide %d (%s): generating...", slide_num, place_name)
+        if _should_skip(slide_path):
+            log.info("Slide %d (%s): skipped (exists)", slide_num, place_name)
+            skipped += 1
+            continue
+
+        # Try real photo first (Google Places API)
+        photo_found = False
+        if GOOGLE_PLACES_API_KEY:
+            try:
+                from pipeline.photo_search import search_place_photo
+
+                photo_found = search_place_photo(
+                    place_name=place_name,
+                    city=city,
+                    output_path=slide_path,
+                )
+                if photo_found:
+                    log.info("Slide %d (%s): real photo sourced", slide_num, place_name)
+                    prompts[f"slide_{slide_num}_{_slugify(place_name)}"] = "(google_places_photo)"
+                    generated += 1
+            except Exception as e:
+                log.warning(
+                    "Slide %d (%s): photo search failed (%s), falling back to AI",
+                    slide_num, place_name, e,
+                )
+
+        # Fall back to AI generation
+        if not photo_found:
+            raw_prompt = place.get("image_prompt", "")
+            location_suffix = build_location_style_suffix(
+                style, perspective_override=perspectives[i]
+            )
+            full_prompt = f"{raw_prompt}. {location_suffix}"
+            prompts[f"slide_{slide_num}_{_slugify(place_name)}"] = full_prompt
+
+            try:
+                log.info("Slide %d (%s): generating AI image...", slide_num, place_name)
                 generate_image(
                     full_prompt, slide_path, system_prompt=IMAGE_SYSTEM_PROMPT
                 )
                 generated += 1
-        except GeminiQuotaError:
-            raise
-        except GeminiError as e:
-            log.error("Slide %d (%s) failed: %s", slide_num, place_name, e)
-            failed += 1
-            failed_slides.append(slide_num)
+            except GeminiQuotaError:
+                raise
+            except GeminiError as e:
+                log.error("Slide %d (%s) failed: %s", slide_num, place_name, e)
+                failed += 1
+                failed_slides.append(slide_num)
 
     # ------------------------------------------------------------------
-    # Slide N+2: CTA
+    # Slide N+2: CTA (built programmatically, not AI-generated)
     # ------------------------------------------------------------------
     cta_slide_num = n_places + 2
     cta_path = output_dir / f"slide_{cta_slide_num}_cta_raw.png"
-    cta_prompt = _CTA_PROMPT
-    prompts[f"slide_{cta_slide_num}_cta"] = cta_prompt
+    place_names_list = [p.get("name", "") for p in places if p.get("name")]
+    prompts[f"slide_{cta_slide_num}_cta"] = "(programmatic — Atlasi ingest UI mockup)"
 
-    reference_images = None
-    if cta_template_path and Path(cta_template_path).exists():
-        reference_images = [Path(cta_template_path)]
+    # Use the hook image as the TikTok thumbnail in the CTA
+    hook_raw = output_dir / "slide_1_hook_raw.png"
+    if not hook_raw.exists():
+        hook_raw = output_dir / "slide_1_raw.png"
 
     try:
         if _should_skip(cta_path):
             log.info("Slide %d (CTA): skipped (exists)", cta_slide_num)
             skipped += 1
         else:
-            log.info("Slide %d (CTA): generating...", cta_slide_num)
-            generate_image(
-                cta_prompt,
-                cta_path,
-                reference_images=reference_images,
-                system_prompt=IMAGE_SYSTEM_PROMPT,
+            log.info("Slide %d (CTA): building programmatically...", cta_slide_num)
+            build_cta_image(
+                city_name=city,
+                place_names=place_names_list,
+                output_path=cta_path,
+                hook_image_path=hook_raw if hook_raw.exists() else None,
             )
             generated += 1
-    except GeminiQuotaError:
-        raise
-    except GeminiError as e:
+    except Exception as e:
         log.error("Slide %d (CTA) failed: %s", cta_slide_num, e)
         failed += 1
         failed_slides.append(cta_slide_num)
