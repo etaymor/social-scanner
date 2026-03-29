@@ -220,6 +220,7 @@ def main() -> None:
             places_for_gen.append(
                 {
                     "name": pd["name"],
+                    "neighborhood": pd.get("neighborhood") or "",
                     "image_prompt": pd.get("image_prompt")
                     or f"A beautiful {pd.get('type', 'place')} in {city_name}",
                 }
@@ -262,7 +263,7 @@ def main() -> None:
                     number="",
                 )
             )
-        slides.append(CTASlideText(text="Save guides like this\ndirectly on Atlasi"))
+        slides.append(CTASlideText(text=""))
 
         texts_path = output_dir / "texts.json"
         texts_path.write_text(to_texts_json(slides), encoding="utf-8")

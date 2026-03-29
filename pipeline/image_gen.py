@@ -225,134 +225,138 @@ def build_cta_image(
     place_names: list[str],
     output_path: Path,
     hook_image_path: Path | None = None,
+    neighborhoods: list[str] | None = None,
 ) -> bool:
-    """Build the CTA slide programmatically — no AI generation.
+    """Build the CTA slide by compositing dynamic content onto the real app template.
 
-    Creates a clean Atlasi app "Save Place" UI mockup with the actual
-    place names rendered as crisp text using Pillow.
+    Uses ``assets/cta_template.png`` (stitched from real Atlasi iOS screenshots)
+    as the base, then overwrites only the dynamic regions: TikTok thumbnail,
+    caption city name, place name rows, and button text.
     """
     from PIL import Image as PILImage, ImageDraw as PILDraw, ImageFont as PILFont
 
     W, H = 1080, 1920
 
-    # Colors matching Atlasi brand
-    bg_color = (255, 251, 243)
-    text_dark = (35, 35, 35)
-    text_gray = (120, 120, 120)
-    accent_gold = (232, 185, 56)
-    divider_color = (230, 225, 215)
+    # --- Load template -----------------------------------------------------------
+    template_path = Path(__file__).resolve().parent.parent / "assets" / "cta_template.png"
+    if not template_path.exists():
+        log.error("CTA template not found: %s", template_path)
+        return False
 
-    img = PILImage.new("RGB", (W, H), bg_color)
+    img = PILImage.open(template_path).convert("RGB")
+    if img.size != (W, H):
+        img = img.resize((W, H), PILImage.LANCZOS)
     draw = PILDraw.Draw(img)
 
-    def _font(size: int) -> PILFont.FreeTypeFont | PILFont.ImageFont:
-        for p in [
+    # --- Fonts -------------------------------------------------------------------
+    def _font(size: int, bold: bool = False) -> PILFont.FreeTypeFont | PILFont.ImageFont:
+        paths = [
+            "/System/Library/Fonts/SFCompact.ttf",
             "/System/Library/Fonts/Helvetica.ttc",
-            "/System/Library/Fonts/Supplemental/Arial.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        ]:
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf" if bold
+            else "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold
+            else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ]
+        for p in paths:
             try:
                 return PILFont.truetype(p, size)
             except OSError:
                 continue
         return PILFont.load_default()
 
-    def _font_bold(size: int) -> PILFont.FreeTypeFont | PILFont.ImageFont:
-        for p in [
-            "/System/Library/Fonts/Helvetica.ttc",
-            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        ]:
-            try:
-                return PILFont.truetype(p, size)
-            except OSError:
-                continue
-        return PILFont.load_default()
+    bg_color = (255, 251, 243)
+    text_dark = (35, 35, 35)
+    text_gray = (140, 140, 140)
 
-    title_font = _font_bold(42)
-    place_font = _font_bold(32)
-    subtitle_font = _font(24)
-    section_font = _font_bold(22)
-    button_font = _font_bold(34)
-    caption_font = _font(22)
-    margin = 40
+    # --- Coordinates (measured from the stitched template at 1080x1920) -----------
+    # Photo thumbnail region (rounded-corner card in the real app)
+    PHOTO_TOP, PHOTO_BOT = 98, 716
+    PHOTO_LEFT, PHOTO_RIGHT = 32, 1047
 
-    y = 60
+    # Caption "Which one would you do first in ___?" — first text line below photo
+    CAPTION_Y = 722
+    CAPTION_X = 38
 
-    # Header
-    draw.text((W // 2, y), "Save Place", font=title_font, fill=text_dark, anchor="mt")
-    draw.text((W - 60, y + 5), "✕", font=_font(36), fill=text_gray, anchor="mt")
-    y += 70
+    # Place-name rows — 4 visible rows (from img2's consistent row spacing)
+    # Each tuple: (name_y, subtitle_y, blank_bottom)
+    # name_y = top of bold place name, subtitle_y = top of gray address line
+    # blank_bottom = bottom of the FULL row area (must cover all template text
+    #   including wrapped subtitles; row spacing is ~212px)
+    ROW_POSITIONS = [
+        (943, 975, 1045),   # Row 1 — blank through subtitle, stop before divider
+        (1155, 1187, 1255),  # Row 2
+        (1365, 1397, 1465),  # Row 3
+        (1577, 1609, 1677),  # Row 4
+    ]
+    ROW_TEXT_LEFT = 95       # x position for place name text (after gold pin)
+    ROW_TEXT_RIGHT = 825     # right edge before icons
 
-    # TikTok thumbnail
-    thumb_h = 300
-    if hook_image_path and hook_image_path.exists():
+    # Button
+    BTN_CENTER_Y = 1898
+
+    # --- 1. Paste hook image into photo area ------------------------------------
+    photo_w = PHOTO_RIGHT - PHOTO_LEFT
+    photo_h = PHOTO_BOT - PHOTO_TOP
+
+    if hook_image_path and Path(hook_image_path).exists():
         try:
             with PILImage.open(hook_image_path) as hook_img:
-                hook_w, hook_h = hook_img.size
-                target_ratio = (W - margin * 2) / thumb_h
-                current_ratio = hook_w / hook_h
+                hw, hh = hook_img.size
+                target_ratio = photo_w / photo_h
+                current_ratio = hw / hh
                 if current_ratio > target_ratio:
-                    new_w = int(hook_h * target_ratio)
-                    left = (hook_w - new_w) // 2
-                    hook_img = hook_img.crop((left, 0, left + new_w, hook_h))
+                    new_w = int(hh * target_ratio)
+                    left = (hw - new_w) // 2
+                    hook_img = hook_img.crop((left, 0, left + new_w, hh))
                 else:
-                    new_h = int(hook_w / target_ratio)
-                    top = (hook_h - new_h) // 2
-                    hook_img = hook_img.crop((0, top, hook_w, top + new_h))
-                hook_img = hook_img.resize((W - margin * 2, thumb_h))
-                img.paste(hook_img, (margin, y))
+                    new_h = int(hw / target_ratio)
+                    top = (hh - new_h) // 2
+                    hook_img = hook_img.crop((0, top, hw, top + new_h))
+                hook_img = hook_img.resize((photo_w, photo_h), PILImage.LANCZOS)
+                img.paste(hook_img, (PHOTO_LEFT, PHOTO_TOP))
         except Exception:
-            draw.rectangle([margin, y, W - margin, y + thumb_h], fill=(60, 60, 60))
-    else:
-        draw.rectangle([margin, y, W - margin, y + thumb_h], fill=(60, 60, 60))
+            log.warning("Failed to paste hook image, keeping template photo")
 
-    # TikTok badge
-    draw.rounded_rectangle([margin + 10, y + 10, margin + 120, y + 42], radius=6, fill=(0, 0, 0))
-    draw.text((margin + 65, y + 26), "TikTok", font=_font_bold(18), fill="white", anchor="mm")
-    y += thumb_h + 20
+    # --- 2. Caption area (TikTok card) -------------------------------------------
+    # The caption text ("Which one would you do first in Istanbul?") sits on the
+    # dark TikTok card (y=700-790). It's embedded in the photo card and hard to
+    # cleanly replace since the card background is the actual photo. We leave it
+    # intact — the hook image above already shows the correct city context.
 
-    # Caption
-    draw.text((margin, y), f"Which one would you do first in {city_name}?", font=caption_font, fill=text_dark)
-    y += 35
-    draw.text((margin, y), "Show more ▾", font=_font(20), fill=(70, 130, 180))
-    y += 45
-    draw.line([(margin, y), (W - margin, y)], fill=divider_color, width=1)
-    y += 20
+    # --- 3. Overwrite place-name rows -------------------------------------------
+    name_font = _font(24, bold=True)
+    sub_font = _font(17)
 
-    # Section header
-    draw.text((margin, y), "SELECT PLACES", font=section_font, fill=text_gray)
-    draw.text((W - margin, y), "Clear all", font=_font(22), fill=(70, 130, 180), anchor="rt")
-    y += 50
+    neighborhoods = neighborhoods or []
+    for i, (name_y, sub_y, blank_bot) in enumerate(ROW_POSITIONS):
+        if i >= len(place_names):
+            # Blank out unused rows
+            draw.rectangle([ROW_TEXT_LEFT, name_y - 3, ROW_TEXT_RIGHT, blank_bot], fill=bg_color)
+            continue
 
-    # Place list
-    for i, name in enumerate(place_names[:8]):
-        pin_cx, pin_cy = margin + 18, y + 22
-        draw.ellipse([pin_cx - 14, pin_cy - 14, pin_cx + 14, pin_cy + 14], fill=accent_gold)
-        draw.ellipse([pin_cx - 4, pin_cy - 4, pin_cx + 4, pin_cy + 4], fill="white")
+        # Blank the text area (preserve icons on the right and gold pin on the left)
+        draw.rectangle([ROW_TEXT_LEFT, name_y - 3, ROW_TEXT_RIGHT, blank_bot], fill=bg_color)
 
-        text_x = margin + 50
-        draw.text((text_x, y + 5), name, font=place_font, fill=text_dark)
-        draw.text((text_x, y + 42), city_name, font=subtitle_font, fill=text_gray)
+        # Draw place name (bold)
+        draw.text((ROW_TEXT_LEFT, name_y), place_names[i], font=name_font, fill=text_dark)
 
-        y += 80
-        if i < len(place_names) - 1:
-            draw.line([(text_x, y - 5), (W - margin, y - 5)], fill=divider_color, width=1)
+        # Draw neighborhood/address subtitle (gray)
+        subtitle = neighborhoods[i] if i < len(neighborhoods) and neighborhoods[i] else city_name
+        draw.text((ROW_TEXT_LEFT, sub_y), subtitle, font=sub_font, fill=text_gray)
 
-    # Save button
-    btn_h = 65
-    btn_y = H - 100 - btn_h
-    draw.rounded_rectangle([50, btn_y, W - 50, btn_y + btn_h], radius=32, fill=accent_gold)
-    draw.text(
-        (W // 2, btn_y + btn_h // 2),
-        f"Save {len(place_names)} Places",
-        font=button_font, fill=text_dark, anchor="mm",
-    )
+    # --- 4. Overwrite button text -----------------------------------------------
+    btn_font = _font(24, bold=True)
+    btn_text = f"Save {len(place_names)} Places"
+    # Blank entire button text area with the gold button color
+    draw.rectangle([150, BTN_CENTER_Y - 22, 930, BTN_CENTER_Y + 22], fill=(232, 185, 56))
+    draw.text((W // 2, BTN_CENTER_Y), btn_text, font=btn_font, fill=text_dark, anchor="mm")
 
+    # --- Save -------------------------------------------------------------------
     dest = Path(output_path)
     dest.parent.mkdir(parents=True, exist_ok=True)
     img.save(dest, format="PNG")
-    log.info("CTA image built programmatically: %s", dest)
+    log.info("CTA image built from template: %s", dest)
     return True
 
 
@@ -501,7 +505,8 @@ def generate_slideshow_images(
     cta_slide_num = n_places + 2
     cta_path = output_dir / f"slide_{cta_slide_num}_cta_raw.png"
     place_names_list = [p.get("name", "") for p in places if p.get("name")]
-    prompts[f"slide_{cta_slide_num}_cta"] = "(programmatic — Atlasi ingest UI mockup)"
+    neighborhoods_list = [p.get("neighborhood", "") for p in places]
+    prompts[f"slide_{cta_slide_num}_cta"] = "(template composite — Atlasi ingest UI)"
 
     # Use the hook image as the TikTok thumbnail in the CTA
     hook_raw = output_dir / "slide_1_hook_raw.png"
@@ -513,12 +518,13 @@ def generate_slideshow_images(
             log.info("Slide %d (CTA): skipped (exists)", cta_slide_num)
             skipped += 1
         else:
-            log.info("Slide %d (CTA): building programmatically...", cta_slide_num)
+            log.info("Slide %d (CTA): building from template...", cta_slide_num)
             build_cta_image(
                 city_name=city,
                 place_names=place_names_list,
                 output_path=cta_path,
                 hook_image_path=hook_raw if hook_raw.exists() else None,
+                neighborhoods=neighborhoods_list,
             )
             generated += 1
     except Exception as e:
