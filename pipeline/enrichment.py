@@ -26,7 +26,12 @@ For each place listed below in {city_name}, provide:
 
 1. The neighborhood or district within the city where this place is located.
 
-2. A detailed image generation prompt (80-120 words) describing a single \
+2. A boolean "in_city": Is this place physically located within or very near \
+{city_name}? Return false if it is in a completely different city or country, \
+even if the place is named after {city_name} (e.g. "Kochi Restaurant" in \
+Dusseldorf is NOT in Kochi, India). When in doubt, return true.
+
+3. A detailed image generation prompt (80-120 words) describing a single \
 breathtaking photograph of this place. Your prompt MUST include ALL of these elements:
 
    SUBJECT: What specifically is in frame? Not "a restaurant" but "a cramped \
@@ -55,7 +60,7 @@ Places:
 
 Return ONLY a JSON object with a "results" key containing an array of objects:
 {{"results": [{{"place_id": <int>, "neighborhood": "<neighborhood/district>", \
-"image_prompt": "<detailed visual description for image generation>"}}]}}"""
+"in_city": true, "image_prompt": "<detailed visual description for image generation>"}}]}}"""
 
 
 def _needs_enrichment(place: sqlite3.Row) -> bool:
@@ -160,10 +165,12 @@ def enrich_places(
                 continue
             neighborhood = item.get("neighborhood", "")
             image_prompt = item.get("image_prompt", "")
+            in_city = item.get("in_city", True)
             if neighborhood and image_prompt:
                 enrichment_lookup[place_id] = {
                     "neighborhood": str(neighborhood).strip(),
                     "image_prompt": str(image_prompt).strip(),
+                    "in_city": bool(in_city),
                 }
 
         # Apply enrichments
@@ -182,6 +189,20 @@ def enrich_places(
                 "UPDATE places SET neighborhood = ?, image_prompt = ? WHERE id = ?",
                 (enrichment["neighborhood"], enrichment["image_prompt"], place["id"]),
             )
+
+            if not enrichment.get("in_city", True):
+                conn.execute(
+                    "UPDATE places SET hidden = TRUE WHERE id = ?",
+                    (place["id"],),
+                )
+                log.info(
+                    "Auto-hidden place %d (%s) — LLM says not in %s (neighborhood: %s)",
+                    place["id"],
+                    place["name"],
+                    city_name,
+                    enrichment["neighborhood"],
+                )
+
             batch_enriched += 1
 
         conn.commit()

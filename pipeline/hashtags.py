@@ -16,8 +16,8 @@ from .llm import LLMError, call_llm_json
 log = logging.getLogger(__name__)
 
 PROMPT_TEMPLATE = """\
-You are a social media research assistant. Given a city name, generate 15 hashtags
-that travelers and locals use on TikTok and Instagram to share NON-OBVIOUS,
+You are a social media research assistant. Given a city name, generate 8 hashtags
+that travelers and locals use on TikTok to share NON-OBVIOUS,
 local-favorite, hidden-gem places. Avoid generic tourism hashtags.
 
 Focus on these categories:
@@ -41,7 +41,7 @@ Example: {{"hashtags": ["istanbulhiddenstreets", "istanbullocaleats", "istanbulr
 
 CATEGORY_PROMPT_TEMPLATE = """\
 You are a social media research assistant. Given a city name and a category,
-generate {count} hashtags that travelers and locals use on TikTok and Instagram
+generate {count} hashtags that travelers and locals use on TikTok
 to share NON-OBVIOUS, local-favorite places in that specific category.
 Avoid generic tourism hashtags.
 
@@ -131,9 +131,9 @@ def generate_hashtags(
     if category and category in config.VALID_CATEGORIES:
         cat_info = config.CATEGORIES[category]
 
-        # ~15 category-specific LLM hashtags (single call)
+        # ~8 category-specific LLM hashtags (single call)
         cat_prompt = CATEGORY_PROMPT_TEMPLATE.format(
-            count=15,
+            count=8,
             city_name=city_name,
             category_label=cat_info["label"],
             category_description=cat_info["description"],

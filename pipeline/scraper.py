@@ -46,9 +46,27 @@ def _map_tiktok(item: dict) -> dict:
     author_meta = item.get("authorMeta", {})
     post_id = item.get("id")
     author_name = author_meta.get("name") or item.get("author")
+
+    # Build caption from text + location metadata
+    caption = item.get("text") or item.get("desc") or ""
+
+    # Append TikTok location tag if present (locationMeta contains tagged location)
+    loc = item.get("locationMeta") or {}
+    loc_name = loc.get("locationName", "").strip()
+    loc_addr = loc.get("address", "").strip()
+    if loc_name:
+        location_parts = [loc_name]
+        if loc_addr and loc_addr.lower() != loc_name.lower():
+            location_parts.append(loc_addr)
+        caption += f"\n📍 Location tag: {', '.join(location_parts)}"
+
+    # Get cover image URL for visual OCR
+    video_meta = item.get("videoMeta") or {}
+    cover_url = video_meta.get("coverUrl") or video_meta.get("originalCoverUrl") or ""
+
     return {
         "post_id": post_id,
-        "caption": item.get("text") or item.get("desc"),
+        "caption": caption,
         "likes": item.get("diggCount") or stats.get("diggCount", 0),
         "comments": item.get("commentCount") or stats.get("commentCount", 0),
         "shares": item.get("shareCount") or stats.get("shareCount", 0),
@@ -59,14 +77,28 @@ def _map_tiktok(item: dict) -> dict:
         ),
         "author": author_name,
         "created_at": item.get("createTime"),
+        "cover_url": cover_url,
     }
 
 
 def _map_instagram(item: dict) -> dict:
     """Map a raw Instagram Apify result to our canonical post dict."""
+    caption = item.get("caption") or ""
+
+    # Append location name if the scraper provides it
+    loc_name = item.get("locationName", "").strip()
+    if not loc_name:
+        loc = item.get("location") or {}
+        loc_name = loc.get("name", "").strip() if isinstance(loc, dict) else ""
+    if loc_name:
+        caption += f"\n📍 Location tag: {loc_name}"
+
+    # Get display image URL for visual OCR
+    cover_url = item.get("displayUrl") or ""
+
     return {
         "post_id": item.get("id"),
-        "caption": item.get("caption"),
+        "caption": caption,
         "likes": item.get("likesCount", 0),
         "comments": item.get("commentsCount", 0),
         "shares": 0,
@@ -75,6 +107,7 @@ def _map_instagram(item: dict) -> dict:
         "url": item.get("url"),
         "author": item.get("ownerUsername"),
         "created_at": item.get("timestamp"),
+        "cover_url": cover_url,
     }
 
 
@@ -107,32 +140,37 @@ def _passes_instagram_filter(post: dict) -> bool:
 # Core scraper
 # ---------------------------------------------------------------------------
 
+# Cap resultsPerPage for TikTok — this is per-hashtag, so keep it low
+_TIKTOK_MAX_PER_HASHTAG = 30
 
-def _scrape_hashtag(
+
+def _scrape_batch(
     client: ApifyClient,
     platform: str,
-    tag: str,
+    tags: list[str],
     max_posts: int,
 ) -> list[dict]:
-    """Run the appropriate Apify actor and return mapped post dicts."""
+    """Run ONE Apify actor call for all *tags* and return mapped post dicts."""
     if platform == "tiktok":
         actor = client.actor(config.TIKTOK_ACTOR)
+        per_hashtag = min(max_posts, _TIKTOK_MAX_PER_HASHTAG)
         run = actor.call(
-            run_input={"hashtags": [tag], "resultsPerPage": max_posts},
+            run_input={"hashtags": tags, "resultsPerPage": per_hashtag},
             build="latest",
         )
         mapper = _map_tiktok
         filt = _passes_tiktok_filter
     else:
         actor = client.actor(config.INSTAGRAM_ACTOR)
+        results_limit = min(max_posts, 200)
         run = actor.call(
-            run_input={"hashtags": [tag], "resultsLimit": max_posts},
+            run_input={"hashtags": tags, "resultsLimit": results_limit},
         )
         mapper = _map_instagram
         filt = _passes_instagram_filter
 
     if run is None:
-        log.warning("Apify actor returned None for %s/%s", platform, tag)
+        log.warning("Apify actor returned None for %s batch (%d tags)", platform, len(tags))
         return []
 
     dataset_id = run["defaultDatasetId"]
@@ -146,22 +184,14 @@ def _scrape_hashtag(
     filtered_out = before - len(mapped)
     if filtered_out:
         log.info(
-            "Filtered out %d/%d low-engagement %s posts for #%s",
+            "Filtered out %d/%d low-engagement %s posts (%d tags)",
             filtered_out,
             before,
             platform,
-            tag,
+            len(tags),
         )
 
     return mapped
-
-
-def _scrape_one(
-    client: ApifyClient, platform: str, tag: str, max_posts: int
-) -> tuple[str, str, list[dict]]:
-    """Scrape a single hashtag (thread-safe). Returns (tag, platform, posts)."""
-    posts = _scrape_hashtag(client, platform, tag, max_posts)
-    return tag, platform, posts
 
 
 def scrape_posts(
@@ -172,8 +202,10 @@ def scrape_posts(
 ) -> int:
     """Scrape pending hashtags for *city_id* and store qualifying posts.
 
-    Returns the total number of posts inserted (including duplicates linked
-    to new hashtags).
+    Groups all pending hashtags by platform and sends ONE Apify actor call
+    per platform (typically 2 total: one TikTok, one Instagram).
+
+    Returns the total number of new posts inserted.
     """
     client = ApifyClient(config.APIFY_API_TOKEN)
     pending = db.get_pending_hashtags(conn, city_id)
@@ -182,43 +214,58 @@ def scrape_posts(
         log.info("No pending hashtags for %s (city_id=%d)", city_name, city_id)
         return 0
 
-    # Mark all as running
+    # Group by platform
+    batches: dict[str, list[sqlite3.Row]] = {}
     for row in pending:
-        db.update_hashtag_status(conn, row["id"], "running")
+        batches.setdefault(row["platform"], []).append(row)
+
+    # Mark all as running
+    all_ids = [row["id"] for row in pending]
+    db.bulk_update_hashtag_status(conn, all_ids, "running")
 
     total_inserted = 0
-    max_workers = min(3, len(pending))
 
-    log.info("Scraping %d hashtags with %d workers...", len(pending), max_workers)
+    log.info(
+        "Scraping %d hashtags in %d batch(es) for %s...",
+        len(pending),
+        len(batches),
+        city_name,
+    )
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {
-            pool.submit(_scrape_one, client, row["platform"], row["tag"], max_posts): row
-            for row in pending
-        }
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = {}
+        for platform, rows in batches.items():
+            tags = [r["tag"] for r in rows]
+            future = pool.submit(_scrape_batch, client, platform, tags, max_posts)
+            futures[future] = (platform, rows)
 
         for future in as_completed(futures):
-            row = futures[future]
-            hashtag_id = row["id"]
-            tag = row["tag"]
-            platform = row["platform"]
+            platform, rows = futures[future]
+            hashtag_ids = [r["id"] for r in rows]
 
             try:
-                _, _, posts = future.result()
+                posts = future.result()
                 inserted = 0
                 for post_data in posts:
                     if not post_data.get("post_id"):
                         continue
-                    raw_id = db.insert_post(conn, city_id, platform, post_data, hashtag_id)
+                    # Insert post linked to first hashtag
+                    raw_id = db.insert_post(conn, city_id, platform, post_data, hashtag_ids[0])
                     if raw_id is not None:
                         inserted += 1
+                        # Link to remaining hashtags
+                        for hid in hashtag_ids[1:]:
+                            conn.execute(
+                                "INSERT OR IGNORE INTO post_hashtags (post_id, hashtag_id) VALUES (?, ?)",
+                                (raw_id, hid),
+                            )
                 conn.commit()
 
-                db.update_hashtag_status(conn, hashtag_id, "completed")
+                db.bulk_update_hashtag_status(conn, hashtag_ids, "completed")
                 log.info(
-                    "Stored %d posts from #%s (%s) for %s",
+                    "Stored %d posts from %d %s hashtags for %s",
                     inserted,
-                    tag,
+                    len(rows),
                     platform,
                     city_name,
                 )
@@ -226,12 +273,12 @@ def scrape_posts(
 
             except _SCRAPE_ERRORS:
                 log.exception(
-                    "Failed to scrape #%s (%s) for %s",
-                    tag,
+                    "Failed to scrape %s batch (%d tags) for %s",
                     platform,
+                    len(rows),
                     city_name,
                 )
-                db.update_hashtag_status(conn, hashtag_id, "failed")
+                db.bulk_update_hashtag_status(conn, hashtag_ids, "failed")
 
     log.info(
         "Scraping complete for %s — %d posts stored from %d hashtags",

@@ -252,6 +252,53 @@
             font-size: 0.8rem;
         }
 
+        .hide-btn {
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 0.85rem;
+            color: #52525b;
+            padding: 0.25rem 0.4rem;
+            border-radius: 4px;
+            transition: all 0.15s;
+        }
+
+        .hide-btn:hover { background: #1a1a1a; color: #f87171; }
+
+        .row-hidden { opacity: 0.4; }
+
+        .posts-row td {
+            padding: 0.5rem 1rem 0.75rem 3rem;
+            border-bottom: 1px solid #1a1a1a;
+            background: #0f0f0f;
+        }
+
+        .post-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.25rem 0.6rem;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            text-decoration: none;
+            margin-right: 0.5rem;
+            margin-bottom: 0.35rem;
+            transition: opacity 0.15s;
+        }
+
+        .post-link:hover { opacity: 0.8; }
+        .post-link.tiktok { background: #1a1a2e; color: #818cf8; border: 1px solid #2a2a4e; }
+        .post-link.instagram { background: #2e1a2e; color: #f0818c; border: 1px solid #4e2a3e; }
+
+        .place-name-link {
+            color: #fff;
+            text-decoration: none;
+            border-bottom: 1px dashed #444;
+            cursor: pointer;
+        }
+
+        .place-name-link:hover { border-bottom-color: #818cf8; }
+
         .empty-state {
             text-align: center;
             padding: 4rem 2rem;
@@ -307,6 +354,10 @@
                 <div class="label">Tourist Traps</div>
                 <div class="value">{{ stats.tourist_traps }}</div>
             </div>
+            <div class="stat-card">
+                <div class="label">Hidden</div>
+                <div class="value">{{ stats.hidden }}</div>
+            </div>
         </div>
 
         <div class="filters">
@@ -329,6 +380,12 @@
                 <option value="yes" {{ 'selected' if trap_filter == 'yes' else '' }}>Only tourist traps</option>
             </select>
             <input type="text" id="searchInput" placeholder="Search places..." oninput="filterTable()" value="{{ search or '' }}">
+            <label style="display:inline-flex; align-items:center; gap:0.35rem; font-size:0.875rem; color:#a1a1aa; cursor:pointer; margin-left:0.5rem;">
+                <input type="checkbox" id="showHiddenToggle" onchange="toggleShowHidden()"
+                       {% if show_hidden %}checked{% endif %}
+                       style="accent-color:#818cf8;">
+                Show hidden
+            </label>
         </div>
 
         {% if places %}
@@ -343,19 +400,28 @@
                     <th onclick="sortTable(5)">Mentions</th>
                     <th>Status</th>
                     <th>Sample Caption</th>
+                    <th style="width:3rem;"></th>
                 </tr>
             </thead>
             <tbody>
                 {% for p in places %}
-                <tr data-type="{{ p.type }}" data-trap="{{ 'yes' if p.is_tourist_trap else 'no' }}" data-name="{{ p.name|lower }}">
+                <tr data-type="{{ p.type }}" data-trap="{{ 'yes' if p.is_tourist_trap else 'no' }}" data-name="{{ p.name|lower }}" data-place-id="{{ p.id }}" {% if p.hidden %}class="row-hidden"{% endif %}>
                     <td class="rank">{{ loop.index }}</td>
-                    <td class="place-name">{{ p.name }}</td>
+                    <td class="place-name">
+                        <a href="#" onclick="togglePosts(event, {{ p.id }}, this)" class="place-name-link">{{ p.name }}</a>
+                    </td>
                     <td><span class="place-type type-{{ p.type }}">{{ p.type }}</span></td>
                     <td>{% if p.category %}<span class="category-badge">{{ category_labels[p.category].label if p.category in category_labels else p.category }}</span>{% else %}—{% endif %}</td>
                     <td class="score">{{ "%.4f"|format(p.virality_score) }}</td>
                     <td class="mentions">{{ p.mention_count }}</td>
                     <td>{% if p.is_tourist_trap %}<span class="trap-badge">TRAP</span>{% endif %}</td>
                     <td class="caption-preview" title="{{ p.sample_caption or '' }}">{{ p.sample_caption or '—' }}</td>
+                    <td>
+                        <button class="hide-btn" onclick="toggleHide({{ p.id }}, this)"
+                                title="{{ 'Unhide' if p.hidden else 'Hide' }} this place">
+                            {{ '&#x1f441;' if p.hidden else '&#x2715;' }}
+                        </button>
+                    </td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -452,6 +518,77 @@
                     row.querySelector('.rank').textContent = rank;
                 }
             });
+        }
+
+        function toggleShowHidden() {
+            const params = new URLSearchParams(window.location.search);
+            const checkbox = document.getElementById('showHiddenToggle');
+            if (checkbox.checked) {
+                params.set('show_hidden', 'true');
+            } else {
+                params.delete('show_hidden');
+            }
+            params.set('page', '1');
+            window.location.search = params.toString();
+        }
+
+        function toggleHide(placeId, btn) {
+            fetch('/api/places/' + placeId + '/hide', { method: 'POST' })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    var row = btn.closest('tr');
+                    if (data.hidden) {
+                        row.classList.add('row-hidden');
+                        btn.innerHTML = '&#x1f441;';
+                        btn.title = 'Unhide this place';
+                    } else {
+                        row.classList.remove('row-hidden');
+                        btn.innerHTML = '&#x2715;';
+                        btn.title = 'Hide this place';
+                    }
+                });
+        }
+
+        function togglePosts(event, placeId, el) {
+            event.preventDefault();
+            var row = el.closest('tr');
+            var next = row.nextElementSibling;
+
+            if (next && next.classList.contains('posts-row')) {
+                next.remove();
+                return;
+            }
+
+            fetch('/api/places/' + placeId + '/posts')
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    var subRow = document.createElement('tr');
+                    subRow.classList.add('posts-row');
+
+                    var colSpan = row.children.length;
+                    var html = '<td colspan="' + colSpan + '">';
+
+                    if (!data.posts || data.posts.length === 0) {
+                        html += '<span style="color:#52525b;">No source posts linked</span>';
+                    } else {
+                        html += '<strong style="color:#71717a; font-size:0.75rem; text-transform:uppercase; letter-spacing:0.05em;">Source Posts:</strong><br><div style="margin-top:0.4rem;">';
+                        data.posts.forEach(function(post) {
+                            var icon = post.platform === 'tiktok' ? '&#9654;' : '&#128247;';
+                            var views = (post.views || 0).toLocaleString();
+                            var likes = (post.likes || 0).toLocaleString();
+                            var stats = views + ' views &middot; ' + likes + ' likes';
+                            var author = post.author || 'unknown';
+                            if (post.url) {
+                                html += '<a href="' + post.url + '" target="_blank" rel="noopener" class="post-link ' + post.platform + '">' + icon + ' @' + author + ' &middot; ' + stats + '</a>';
+                            }
+                        });
+                        html += '</div>';
+                    }
+
+                    html += '</td>';
+                    subRow.innerHTML = html;
+                    row.after(subRow);
+                });
         }
 
         // Apply filters on page load
