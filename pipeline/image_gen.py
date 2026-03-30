@@ -392,7 +392,9 @@ def generate_slideshow_images(
         IMAGE_SYSTEM_PROMPT,
         build_hook_style_block,
         build_location_style_suffix,
+        build_preset_prompt,
         get_perspectives_for_slides,
+        select_preset_for_place,
         select_slideshow_style,
     )
 
@@ -410,6 +412,7 @@ def generate_slideshow_images(
 
     n_places = len(places)
     prompts: dict[str, str] = {}
+    presets_used: list[str] = []
     generated = 0
     skipped = 0
     failed = 0
@@ -480,10 +483,24 @@ def generate_slideshow_images(
         # Fall back to AI generation
         if not photo_found:
             raw_prompt = place.get("image_prompt", "")
-            location_suffix = build_location_style_suffix(
-                style, perspective_override=perspectives[i]
-            )
-            full_prompt = f"{raw_prompt}. {location_suffix}"
+            category = place.get("category", "")
+
+            # Try image preset based on place category
+            preset = select_preset_for_place(category)
+            if preset:
+                full_prompt = build_preset_prompt(preset, raw_prompt)
+                presets_used.append(preset["style"])
+                log.info(
+                    "Slide %d (%s): using preset '%s'",
+                    slide_num, place_name, preset["name"],
+                )
+            else:
+                location_suffix = build_location_style_suffix(
+                    style, perspective_override=perspectives[i]
+                )
+                full_prompt = f"{raw_prompt}. {location_suffix}"
+                presets_used.append("composited")
+
             prompts[f"slide_{slide_num}_{_slugify(place_name)}"] = full_prompt
 
             try:
@@ -542,11 +559,21 @@ def generate_slideshow_images(
     )
     log.info("Prompts saved to %s", prompts_path)
 
+    # Determine dominant preset for analytics tracking
+    if presets_used:
+        from collections import Counter
+        preset_counts = Counter(presets_used)
+        dominant_preset = preset_counts.most_common(1)[0][0]
+    else:
+        dominant_preset = "composited"
+
     result = {
         "generated": generated,
         "skipped": skipped,
         "failed": failed,
         "failed_slides": failed_slides,
+        "presets_used": presets_used,
+        "dominant_preset": dominant_preset,
     }
     log.info(
         "Image generation complete: %d generated, %d skipped, %d failed",

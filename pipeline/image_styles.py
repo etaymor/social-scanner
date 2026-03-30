@@ -29,6 +29,13 @@ class SlideshowStyle(TypedDict):
     color_mood: StyleOption
 
 
+class ImagePreset(TypedDict):
+    name: str            # e.g. "bright_hazy_vista"
+    style: str           # analytics key, e.g. "high_key_atmospheric_travel"
+    template: str        # prompt with [INSERT SUBJECT HERE] placeholder
+    negative_prompt: str
+
+
 # ---------------------------------------------------------------------------
 # Variety palettes
 # ---------------------------------------------------------------------------
@@ -216,6 +223,82 @@ _INCOMPATIBLE: set[tuple[str, str]] = {
 }
 
 
+_PRESET_USE_PROBABILITY = 0.7  # 70% chance to use preset, 30% composited
+
+
+# ---------------------------------------------------------------------------
+# Image presets — self-contained prompt templates per visual mood
+# ---------------------------------------------------------------------------
+
+IMAGE_PRESETS: list[ImagePreset] = [
+    {
+        "name": "bright_hazy_vista",
+        "style": "high_key_atmospheric_travel",
+        "template": (
+            "[INSERT SUBJECT HERE] captured with a bright, high-key visual aesthetic. "
+            "The image is dominated by a strong, diffused, high-angle light source "
+            "(such as the sun through a hazy layer) that creates a soft, misty "
+            "atmospheric haze, reducing background contrast. In stark, high-contrast "
+            "opposition, the extreme foreground elements are sharply defined with very "
+            "deep, almost pitch-black, crushed shadows. The foreground features "
+            "intricate, complex textures (like dense, intricate patterns or materials) "
+            "that appear sharp and detailed against the soft background. The entire "
+            "composition has a cool, blue-ish environmental tone. High-resolution, "
+            "professional travel-journalism style, 9:16 aspect ratio."
+        ),
+        "negative_prompt": (
+            "oversaturated, golden hour, flat lighting, warm tones, blurry foreground"
+        ),
+    },
+    {
+        "name": "moody_symmetry",
+        "style": "low_key_architectural",
+        "template": (
+            "A perfectly symmetrical, low-angle vertical photograph of "
+            "[INSERT SUBJECT HERE]. The composition is defined by a rhythmic "
+            "repetition of dark structural elements and high-contrast vaulted shapes "
+            "that create a deep one-point perspective. The color palette is dominated "
+            "by rich, dark earth tones and polished textures. Dramatic low-key "
+            "lighting creates deep shadows and warm, focused highlights on "
+            "architectural details. High-resolution textures, sharp focus throughout "
+            "the frame, professional architectural photography style, 9:16 aspect ratio."
+        ),
+        "negative_prompt": (
+            "bright, airy, flat lighting, outdoor daylight, cluttered, blurry, people"
+        ),
+    },
+    {
+        "name": "travel_aesthetic",
+        "style": "photorealistic_travel",
+        "template": (
+            "[INSERT SUBJECT HERE] captured in a high-resolution cinematic travel "
+            "photography style. Sharp foreground details with clear textures, warm "
+            "directional sunlight from a low angle creating soft shadows. Vast, "
+            "open-air composition with a soft atmospheric haze on the horizon "
+            "transitioning into a deep, clear blue sky. Professional 35mm lens "
+            "aesthetic, natural earth-tone color palette, 9:16 aspect ratio."
+        ),
+        "negative_prompt": (
+            "oversaturated, blurry, distorted, crowded, urban clutter"
+        ),
+    },
+]
+
+PRESET_BY_NAME: dict[str, ImagePreset] = {p["name"]: p for p in IMAGE_PRESETS}
+
+# Category → preferred preset name
+CATEGORY_PRESET_MAP: dict[str, str] = {
+    "outdoors_and_nature": "bright_hazy_vista",
+    "sights_and_attractions": "moody_symmetry",
+    "arts_and_culture": "moody_symmetry",
+    "food_and_drink": "travel_aesthetic",
+    "nightlife": "travel_aesthetic",
+    "shopping": "travel_aesthetic",
+    "places_to_stay": "travel_aesthetic",
+    "activities_and_experiences": "travel_aesthetic",
+}
+
+
 def _is_compatible(style: SlideshowStyle) -> bool:
     """Check that no two selections clash."""
     names = [
@@ -262,6 +345,50 @@ IMAGE_SYSTEM_PROMPT = (
     "behaviour, authentic textures, and environmental storytelling. The viewer should "
     "feel like they could step into the scene."
 )
+
+# Universal negatives shared by both composited prompts and presets
+NEGATIVE_GUIDANCE_CORE = (
+    "CRITICAL: Do NOT render any text, words, letters, numbers, signs, labels, "
+    "captions, titles, or typography of any kind anywhere in the image. "
+    "No watermarks, no logos, no UI elements, no borders, no signage. "
+    "No people looking directly at camera, no posed selfies, no group photos. "
+    "No oversaturated HDR look, no AI glow effect, no plastic skin texture. "
+    "No clipart or illustrated elements. No collage or split-screen layouts."
+)
+
+# ---------------------------------------------------------------------------
+# Preset selection & prompt building
+# ---------------------------------------------------------------------------
+
+
+def select_preset_for_place(category: str) -> ImagePreset | None:
+    """Pick an image preset for a place based on its category.
+
+    Returns the matched :class:`ImagePreset` ~70% of the time and *None*
+    (meaning fall back to composited style suffix) ~30% of the time.
+    """
+    preset_name = CATEGORY_PRESET_MAP.get(category)
+    if not preset_name:
+        return None
+    if random.random() > _PRESET_USE_PROBABILITY:
+        return None
+    return PRESET_BY_NAME[preset_name]
+
+
+def build_preset_prompt(preset: ImagePreset, subject: str) -> str:
+    """Build a complete image generation prompt from a preset and subject.
+
+    Replaces ``[INSERT SUBJECT HERE]`` in the preset template with *subject*
+    (the enrichment image_prompt), then appends the preset's negative prompt
+    and universal negative guidance.
+    """
+    body = preset["template"].replace("[INSERT SUBJECT HERE]", subject)
+    return (
+        f"{body} "
+        f"AVOID: {preset['negative_prompt']}. "
+        f"{NEGATIVE_GUIDANCE_CORE}"
+    )
+
 
 # ---------------------------------------------------------------------------
 # Selection & assembly

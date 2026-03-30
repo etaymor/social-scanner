@@ -258,12 +258,13 @@ def main() -> None:
         from pipeline.image_styles import select_weighted_style
 
         visual_style = select_weighted_style(perf_weights)
-        style_json = json.dumps({
+        # style_json built after image generation to include preset info
+        _style_dict = {
             "time_of_day": visual_style["time_of_day"]["name"],
             "weather": visual_style["weather"]["name"],
             "perspective": visual_style["perspective"]["name"],
             "color_mood": visual_style["color_mood"]["name"],
-        })
+        }
         log.info(
             "Visual style: %s + %s + %s + %s",
             visual_style["time_of_day"]["name"],
@@ -281,6 +282,8 @@ def main() -> None:
                     "neighborhood": pd.get("neighborhood") or "",
                     "image_prompt": pd.get("image_prompt")
                     or f"A beautiful {pd.get('type', 'place')} in {city_name}",
+                    "category": pd.get("category") or "",
+                    "type": pd.get("type") or "",
                 }
             )
 
@@ -307,6 +310,10 @@ def main() -> None:
         )
         if img_result["failed_slides"]:
             log.warning("Failed slides: %s", img_result["failed_slides"])
+
+        # Finalize style_json with preset info from image generation
+        _style_dict["image_preset"] = img_result.get("dominant_preset", "composited")
+        style_json = json.dumps(_style_dict)
 
         # Step 7/11: Build texts.json
         log.info("Step 7/11: Building texts.json...")

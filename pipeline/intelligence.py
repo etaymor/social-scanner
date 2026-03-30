@@ -17,8 +17,8 @@ import config
 
 log = logging.getLogger(__name__)
 
-# The 9 tracked dimensions.  The first 5 come directly from slideshows
-# columns; the next 4 are decomposed from the visual_style JSON column;
+# The 10 tracked dimensions.  The first 5 come directly from slideshows
+# columns; the next 5 are decomposed from the visual_style JSON column;
 # virality_band is derived from places.virality_score.
 DIMENSIONS = (
     "category",
@@ -28,11 +28,12 @@ DIMENSIONS = (
     "weather",
     "perspective",
     "color_mood",
+    "image_preset",
     "cta",
     "virality_band",
 )
 
-_VISUAL_STYLE_KEYS = ("time_of_day", "weather", "perspective", "color_mood")
+_VISUAL_STYLE_KEYS = ("time_of_day", "weather", "perspective", "color_mood", "image_preset")
 
 _VIRALITY_BANDS = ("0-25", "25-50", "50-75", "75-100")
 
