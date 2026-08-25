@@ -64,6 +64,14 @@ def print_summary(
     print()
 
 
+def _safe_get(row_or_dict, key: str, default=None):
+    """Get a value from either a sqlite3.Row or dict, with a default fallback."""
+    try:
+        return row_or_dict[key]
+    except (KeyError, IndexError):
+        return default
+
+
 def export_csv(
     conn: sqlite3.Connection, city_id: int, city_name: str, filepath: str | None = None
 ) -> str:
@@ -83,7 +91,7 @@ def export_csv(
                     i,
                     p["name"],
                     p["type"],
-                    p.get("category", ""),
+                    _safe_get(p, "category", ""),
                     p["mention_count"],
                     p["virality_score"],
                 ]
