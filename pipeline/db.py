@@ -2,6 +2,7 @@
 
 import re
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 from config import DB_PATH, PLACE_REUSE_COOLDOWN_DAYS
@@ -125,6 +126,13 @@ def init_db(conn: sqlite3.Connection) -> None:
     # Migration — add hidden column for soft-delete / blocking places
     try:
         conn.execute("ALTER TABLE places ADD COLUMN hidden BOOLEAN DEFAULT FALSE")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" not in str(e):
+            raise
+
+    # Migration — add posted_at as normalized ISO UTC timestamp
+    try:
+        conn.execute("ALTER TABLE raw_posts ADD COLUMN posted_at TEXT DEFAULT NULL")
     except sqlite3.OperationalError as e:
         if "duplicate column name" not in str(e):
             raise
@@ -338,6 +346,27 @@ def bulk_update_hashtag_status(
 # --- Post helpers ---
 
 
+def _normalize_posted_at(created_at: str | int | None) -> str | None:
+    """Normalize a timestamp to ISO UTC string. Returns None if unparseable."""
+    if created_at is None:
+        return None
+    try:
+        if isinstance(created_at, int):
+            dt = datetime.fromtimestamp(created_at, tz=timezone.utc)
+        elif isinstance(created_at, str):
+            # Try ISO format first
+            try:
+                dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                # Try as integer timestamp
+                dt = datetime.fromtimestamp(int(created_at), tz=timezone.utc)
+        else:
+            return None
+        return dt.isoformat()
+    except (ValueError, TypeError, OSError):
+        return None
+
+
 def insert_post(
     conn: sqlite3.Connection,
     city_id: int,
@@ -347,11 +376,14 @@ def insert_post(
 ) -> int | None:
     """Insert a post. Returns the raw_posts.id or None if duplicate."""
     try:
+        # Normalize created_at to posted_at as ISO UTC
+        posted_at = _normalize_posted_at(post_data.get("created_at"))
+        
         cur = conn.execute(
             """INSERT OR IGNORE INTO raw_posts
                (city_id, platform, post_id, caption, likes, comments, shares,
-                saves, views, url, author, created_at, cover_url)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                saves, views, url, author, created_at, cover_url, posted_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 city_id,
                 platform,
@@ -366,6 +398,7 @@ def insert_post(
                 post_data.get("author"),
                 post_data.get("created_at"),
                 post_data.get("cover_url"),
+                posted_at,
             ),
         )
         if cur.rowcount == 0:

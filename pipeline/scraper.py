@@ -3,6 +3,7 @@
 import logging
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
 
 import requests
 from apify_client import ApifyClient
@@ -64,13 +65,16 @@ def _map_tiktok(item: dict) -> dict:
     video_meta = item.get("videoMeta") or {}
     cover_url = video_meta.get("coverUrl") or video_meta.get("originalCoverUrl") or ""
 
+    # Get collectCount from top-level OR stats (fallback)
+    saves = item.get("collectCount") or stats.get("collectCount", 0)
+
     return {
         "post_id": post_id,
         "caption": caption,
         "likes": item.get("diggCount") or stats.get("diggCount", 0),
         "comments": item.get("commentCount") or stats.get("commentCount", 0),
         "shares": item.get("shareCount") or stats.get("shareCount", 0),
-        "saves": item.get("collectCount", 0),
+        "saves": saves,
         "views": item.get("playCount") or stats.get("playCount", 0),
         "url": (
             item.get("webVideoUrl") or f"https://www.tiktok.com/@{author_name}/video/{post_id}"
@@ -140,8 +144,66 @@ def _passes_instagram_filter(post: dict) -> bool:
 # Core scraper
 # ---------------------------------------------------------------------------
 
-# Cap resultsPerPage for TikTok — this is per-hashtag, so keep it low
+# Cap resultsPerPage for TikTok — this is per-hashtag, so keep it low (can be lifted with --max-posts)
 _TIKTOK_MAX_PER_HASHTAG = 30
+
+
+def _generate_search_queries(city_name: str, category: str | None = None) -> list[str]:
+    """Generate search queries for TikTok search mode (city + food/neighborhood combos)."""
+    city = city_name.lower()
+    queries = []
+    
+    if category == "food_and_drink" or category is None:
+        # Core food search terms
+        food_terms = ["ramen", "cafe", "izakaya", "bakery", "sushi", "coffee"]
+        for term in food_terms:
+            queries.append(f"{city} {term}")
+        
+        # Tokyo-specific neighborhoods (add more cities later)
+        if city == "tokyo":
+            neighborhoods = ["shibuya", "shinjuku", "harajuku", "roppongi", "ginza"]
+            for neighborhood in neighborhoods:
+                queries.append(f"{neighborhood} food")
+    
+    return queries
+
+
+def _parse_timestamp(ts: str | int | None) -> datetime | None:
+    """Parse a TikTok/Instagram timestamp to datetime. Returns None if unparseable."""
+    if ts is None:
+        return None
+    try:
+        if isinstance(ts, int):
+            return datetime.fromtimestamp(ts, tz=timezone.utc)
+        if isinstance(ts, str):
+            # Try ISO format first
+            try:
+                return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                # Try as integer timestamp
+                return datetime.fromtimestamp(int(ts), tz=timezone.utc)
+    except (ValueError, TypeError, OSError):
+        return None
+    return None
+
+
+def _filter_by_window(posts: list[dict], window_days: int | None) -> list[dict]:
+    """Client-side filter posts to only include those from the last window_days."""
+    if window_days is None:
+        return posts
+    
+    cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
+    filtered = []
+    for post in posts:
+        created_dt = _parse_timestamp(post.get("created_at"))
+        if created_dt and created_dt >= cutoff:
+            filtered.append(post)
+    
+    dropped = len(posts) - len(filtered)
+    if dropped:
+        log.info("Filtered out %d posts outside %d-day window", dropped, window_days)
+    
+    return filtered
 
 
 def _scrape_batch(
@@ -149,13 +211,25 @@ def _scrape_batch(
     platform: str,
     tags: list[str],
     max_posts: int,
+    window_days: int | None = None,
+    search_queries: list[str] | None = None,
 ) -> list[dict]:
     """Run ONE Apify actor call for all *tags* and return mapped post dicts."""
     if platform == "tiktok":
         actor = client.actor(config.TIKTOK_ACTOR)
-        per_hashtag = min(max_posts, _TIKTOK_MAX_PER_HASHTAG)
+        # Lift the 30-post cap when user specifies --max-posts explicitly
+        per_hashtag = max_posts
+        run_input = {"hashtags": tags, "resultsPerPage": per_hashtag}
+        
+        # Add search queries if provided (search mode)
+        if search_queries:
+            run_input["searchQueries"] = search_queries
+            run_input["searchSection"] = "/video"
+            # Note: videoSearchDateFilter might not be documented or available
+            # We'll rely on client-side filtering via window_days
+        
         run = actor.call(
-            run_input={"hashtags": tags, "resultsPerPage": per_hashtag},
+            run_input=run_input,
             build="latest",
         )
         mapper = _map_tiktok
@@ -178,6 +252,9 @@ def _scrape_batch(
 
     mapped = [mapper(item) for item in items]
 
+    # Filter by date window (client-side)
+    mapped = _filter_by_window(mapped, window_days)
+
     # Filter out low-engagement posts
     before = len(mapped)
     mapped = [p for p in mapped if filt(p)]
@@ -199,11 +276,17 @@ def scrape_posts(
     city_id: int,
     city_name: str,
     max_posts: int = 100,
+    window_days: int | None = None,
+    search_mode: bool = False,
 ) -> int:
     """Scrape pending hashtags for *city_id* and store qualifying posts.
 
     Groups all pending hashtags by platform and sends ONE Apify actor call
     per platform (typically 2 total: one TikTok, one Instagram).
+
+    When window_days is set, posts are filtered client-side to only include
+    those from the last N days. When search_mode is True, TikTok scraping
+    uses searchQueries in addition to hashtags.
 
     Returns the total number of new posts inserted.
     """
@@ -232,11 +315,22 @@ def scrape_posts(
         city_name,
     )
 
+    # Generate search queries for TikTok if search mode is enabled
+    search_queries = None
+    if search_mode:
+        # Get category from first hashtag row (they should all be same category)
+        category = pending[0]["category"] if pending else None
+        search_queries = _generate_search_queries(city_name, category)
+        if search_queries:
+            log.info("Generated %d search queries for search mode", len(search_queries))
+
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = {}
         for platform, rows in batches.items():
             tags = [r["tag"] for r in rows]
-            future = pool.submit(_scrape_batch, client, platform, tags, max_posts)
+            # Only pass search queries to TikTok
+            queries = search_queries if platform == "tiktok" else None
+            future = pool.submit(_scrape_batch, client, platform, tags, max_posts, window_days, queries)
             futures[future] = (platform, rows)
 
         for future in as_completed(futures):

@@ -120,6 +120,22 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Max posts per hashtag per platform (default: {DEFAULT_MAX_POSTS})",
     )
     parser.add_argument(
+        "--window-days",
+        type=int,
+        default=30,
+        help="Only include posts from the last N days (default: 30)",
+    )
+    parser.add_argument(
+        "--search-mode",
+        action="store_true",
+        help="Use TikTok search queries instead of only hashtags (includes neighborhood+food combos)",
+    )
+    parser.add_argument(
+        "--repend-hashtags",
+        action="store_true",
+        help="Reset completed hashtags to pending for re-scraping without deleting existing data",
+    )
+    parser.add_argument(
         "--skip-scrape",
         action="store_true",
         help="Skip Apify scraping, run extraction on existing data",
@@ -179,6 +195,16 @@ def main() -> None:
             if reset_count:
                 log.info("Reset %d failed hashtags to pending for retry", reset_count)
 
+        # Repend completed hashtags if requested (for windowed re-scraping)
+        if args.repend_hashtags:
+            repend_count = conn.execute(
+                "UPDATE hashtags SET scrape_status = 'pending' WHERE city_id = ? AND scrape_status = 'completed'",
+                (city_id,),
+            ).rowcount
+            conn.commit()
+            if repend_count:
+                log.info("Reset %d completed hashtags to pending for windowed re-scraping", repend_count)
+
         # Step 1: Hashtag Generation
         from pipeline.hashtags import generate_hashtags
 
@@ -199,7 +225,14 @@ def main() -> None:
             from pipeline.scraper import scrape_posts
 
             log.info("Step 2/5: Scraping social media posts...")
-            scrape_posts(conn, city_id, city_name, max_posts=args.max_posts)
+            scrape_posts(
+                conn,
+                city_id,
+                city_name,
+                max_posts=args.max_posts,
+                window_days=args.window_days,
+                search_mode=args.search_mode,
+            )
         else:
             log.info("Step 2/5: Skipping scraping (--skip-scrape)")
 
