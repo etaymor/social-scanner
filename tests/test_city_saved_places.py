@@ -235,6 +235,90 @@ def test_rank_repeating_saves_excludes_neighborhood_and_street(conn, city_id):
     assert result.places[0].place.name == "Test Restaurant"
 
 
+def test_rank_repeating_saves_excludes_tourist_traps(conn, city_id):
+    """Test that places marked as is_tourist_trap are excluded from ranking.
+    
+    This covers:
+    - Generic city+cuisine names (Tokyo Sushi, Tokyo Ramen)
+    - Places with off-city location tags (Tucson, Aachen, Brisbane)
+    - Places already marked is_tourist_trap by filter_generic_and_off_city
+    """
+    now = datetime.now(timezone.utc)
+    recent_date = (now - timedelta(days=5)).isoformat()
+    
+    # Place 1: Tokyo Sushi (generic name, marked as tourist trap)
+    cur = conn.execute(
+        "INSERT INTO places (city_id, name, type, category, mention_count, virality_score, is_tourist_trap) "
+        "VALUES (?, 'Tokyo Sushi', 'restaurant', 'food_and_drink', 5, 0.9, TRUE)",
+        (city_id,),
+    )
+    place1_id = cur.lastrowid
+    for i in range(3):
+        cur = conn.execute(
+            "INSERT INTO raw_posts (city_id, platform, post_id, author, saves, posted_at) "
+            "VALUES (?, 'tiktok', ?, ?, 100, ?)",
+            (city_id, f"sushi_{i}", f"author_{i}", recent_date),
+        )
+        post_id = cur.lastrowid
+        conn.execute(
+            "INSERT INTO place_posts (place_id, post_id) VALUES (?, ?)",
+            (place1_id, post_id),
+        )
+    
+    # Place 2: CHERMSIDE SANDWICH (off-city, marked as tourist trap)
+    cur = conn.execute(
+        "INSERT INTO places (city_id, name, type, category, mention_count, virality_score, is_tourist_trap) "
+        "VALUES (?, 'CHERMSIDE SANDWICH', 'restaurant', 'food_and_drink', 3, 0.7, TRUE)",
+        (city_id,),
+    )
+    place2_id = cur.lastrowid
+    for i in range(3):
+        cur = conn.execute(
+            "INSERT INTO raw_posts (city_id, platform, post_id, author, saves, posted_at, caption) "
+            "VALUES (?, 'tiktok', ?, ?, 50, ?, ?)",
+            (city_id, f"chermside_{i}", f"author_{i+10}", recent_date, "📍 Location tag: Chermside, Brisbane"),
+        )
+        post_id = cur.lastrowid
+        conn.execute(
+            "INSERT INTO place_posts (place_id, post_id) VALUES (?, ?)",
+            (place2_id, post_id),
+        )
+    
+    # Place 3: Real Tokyo venue (should be included)
+    cur = conn.execute(
+        "INSERT INTO places (city_id, name, type, category, mention_count, virality_score, is_tourist_trap) "
+        "VALUES (?, 'Nakiryu Ramen', 'restaurant', 'food_and_drink', 4, 0.6, FALSE)",
+        (city_id,),
+    )
+    place3_id = cur.lastrowid
+    for i in range(4):
+        cur = conn.execute(
+            "INSERT INTO raw_posts (city_id, platform, post_id, author, saves, posted_at) "
+            "VALUES (?, 'tiktok', ?, ?, 30, ?)",
+            (city_id, f"nakiryu_{i}", f"author_{i+20}", recent_date),
+        )
+        post_id = cur.lastrowid
+        conn.execute(
+            "INSERT INTO place_posts (place_id, post_id) VALUES (?, ?)",
+            (place3_id, post_id),
+        )
+    
+    conn.commit()
+    
+    city_name = conn.execute("SELECT name FROM cities WHERE id = ?", (city_id,)).fetchone()["name"]
+    result = rank_repeating_saves(city_name, category="food_and_drink", conn=conn)
+    
+    # Should only include Place 3 (real Tokyo venue), not the tourist traps
+    assert len(result.places) == 1
+    assert result.places[0].place.name == "Nakiryu Ramen"
+    assert result.places[0].rank == 1
+    
+    # Verify Tokyo Sushi and CHERMSIDE are NOT in results
+    place_names = {p.place.name for p in result.places}
+    assert "Tokyo Sushi" not in place_names
+    assert "CHERMSIDE SANDWICH" not in place_names
+
+
 def test_export_city_guide_json(tmp_path: Path):
     """Test JSON export with honest method labels."""
     place = DurablePlace(
