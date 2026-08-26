@@ -152,7 +152,8 @@ def rank_repeating_saves(
         city_id = city_row["id"]
         
         # Build WHERE clause for category and window filtering
-        where_parts = ["p.city_id = ?", "p.hidden = FALSE"]
+        # Skip hidden places AND tourist traps (which includes generic/off-city places)
+        where_parts = ["p.city_id = ?", "p.hidden = FALSE", "p.is_tourist_trap = FALSE"]
         params = [city_id]
         
         if category:
