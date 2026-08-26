@@ -31,7 +31,8 @@ class TestDatabase:
         assert row["cnt"] == 0
 
     def test_insert_hashtags_creates_both_platforms(self, conn, city_id):
-        db.insert_hashtags(conn, city_id, ["foodie"])
+        # Explicitly pass both platforms to test multi-platform support
+        db.insert_hashtags(conn, city_id, ["foodie"], platforms=("tiktok", "instagram"))
         rows = conn.execute(
             "SELECT * FROM hashtags WHERE city_id = ?",
             (city_id,),
@@ -41,8 +42,9 @@ class TestDatabase:
         assert platforms == {"tiktok", "instagram"}
 
     def test_insert_hashtags_idempotent(self, conn, city_id):
-        db.insert_hashtags(conn, city_id, ["foodie"])
-        db.insert_hashtags(conn, city_id, ["foodie"])
+        # Explicitly pass both platforms to test idempotency
+        db.insert_hashtags(conn, city_id, ["foodie"], platforms=("tiktok", "instagram"))
+        db.insert_hashtags(conn, city_id, ["foodie"], platforms=("tiktok", "instagram"))
         rows = conn.execute(
             "SELECT * FROM hashtags WHERE city_id = ?",
             (city_id,),

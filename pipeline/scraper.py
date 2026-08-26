@@ -149,21 +149,29 @@ _TIKTOK_MAX_PER_HASHTAG = 30
 
 
 def _generate_search_queries(city_name: str, category: str | None = None) -> list[str]:
-    """Generate search queries for TikTok search mode (city + food/neighborhood combos)."""
+    """Generate search queries for TikTok search mode (itinerary and must-eat focused).
+    
+    Returns queries that target listicle/guide content rather than single-shop features.
+    Focuses on overlap with itinerary and must-eat recommendations.
+    """
     city = city_name.lower()
     queries = []
     
     if category == "food_and_drink" or category is None:
-        # Core food search terms
-        food_terms = ["ramen", "cafe", "izakaya", "bakery", "sushi", "coffee"]
-        for term in food_terms:
-            queries.append(f"{city} {term}")
+        # Itinerary-focused queries (English)
+        queries.extend([
+            f"{city} itinerary",
+            f"{city} must eat",
+            f"{city} food guide",
+            f"{city} best restaurants",
+            f"{city} eats",
+        ])
         
-        # Tokyo-specific neighborhoods (add more cities later)
+        # City-specific localized queries
         if city == "tokyo":
-            neighborhoods = ["shibuya", "shinjuku", "harajuku", "roppongi", "ginza"]
-            for neighborhood in neighborhoods:
-                queries.append(f"{neighborhood} food")
+            queries.extend([
+                "東京 グルメ おすすめ",  # Tokyo gourmet recommendations
+            ])
     
     return queries
 
@@ -225,8 +233,14 @@ def _scrape_batch(
         if search_queries:
             run_input["searchQueries"] = search_queries
             run_input["searchSection"] = "/video"
-            # Note: videoSearchDateFilter might not be documented or available
-            # We'll rely on client-side filtering via window_days
+            # Use actor-side date filtering when window_days is set to reduce credits
+            if window_days is not None and window_days <= 30:
+                run_input["videoSearchDateFilter"] = "THIS_MONTH"
+        
+        # For hashtag scraping with window_days, use oldestPostDateUnified if available
+        if window_days is not None and tags:
+            cutoff_dt = datetime.now(timezone.utc) - timedelta(days=window_days)
+            run_input["oldestPostDateUnified"] = cutoff_dt.isoformat()
         
         run = actor.call(
             run_input=run_input,
