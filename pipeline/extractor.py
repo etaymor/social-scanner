@@ -24,6 +24,8 @@ Rules:
 - DO extract places even if only a business name is given (e.g. "@CafeBlue" → "Cafe Blue")
 - DO extract places from numbered lists (e.g. "1. Sushi Dai 2. Ramen Street" → extract both)
 - DO NOT extract the city name itself ("{city_name}") or the country name as a place
+- DO NOT extract generic city + cuisine combinations (e.g. "Tokyo Sushi", "Tokyo Ramen") unless they are clearly a specific business name with additional context
+- DO NOT extract standalone neighborhood or area names from location tags unless paired with a specific business name (e.g. "Shibuya" alone is not a venue, but "Shibuya Crossing" or "Cafe in Shibuya" would be)
 - Skip only truly generic references without any name (e.g. "this cute cafe", "a random bar")
 
 Valid types: restaurant, cafe, bar, club, market, neighborhood, viewpoint, park, museum, gallery, shop, activity, street, hotel, hostel, tour, class, beach, temple, spa, brewery, lounge, bakery, garden, theater, monument, boutique, trail, workshop, other

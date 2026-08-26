@@ -1,11 +1,41 @@
 """Tests for scraper field mapping and engagement filters."""
 
+from datetime import datetime, timedelta, timezone
+
 from pipeline.scraper import (
+    _generate_search_queries,
     _map_instagram,
     _map_tiktok,
     _passes_instagram_filter,
     _passes_tiktok_filter,
 )
+
+
+class TestQueryGeneration:
+    def test_tokyo_food_queries(self):
+        queries = _generate_search_queries("Tokyo", "food_and_drink")
+        assert "tokyo itinerary" in queries
+        assert "tokyo must eat" in queries
+        assert "tokyo food guide" in queries
+        assert "tokyo best restaurants" in queries
+        assert "tokyo eats" in queries
+        assert "東京 グルメ おすすめ" in queries
+        # Should NOT generate old cuisine-based queries
+        assert "tokyo ramen" not in queries
+        assert "tokyo sushi" not in queries
+        assert "shibuya food" not in queries
+
+    def test_generic_city_queries(self):
+        queries = _generate_search_queries("Bangkok", "food_and_drink")
+        assert "bangkok itinerary" in queries
+        assert "bangkok must eat" in queries
+        assert "bangkok food guide" in queries
+        # Should not have city-specific localized queries
+        assert not any("グルメ" in q for q in queries)
+
+    def test_no_queries_for_non_food_category(self):
+        queries = _generate_search_queries("Tokyo", "nightlife")
+        assert queries == []
 
 
 class TestTikTokMapping:

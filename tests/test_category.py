@@ -583,9 +583,14 @@ class TestUpsertCategory:
 class TestHashtagCategoryIsolation:
     def test_pending_hashtags_filtered_by_category(self, conn, city_id):
         """get_pending_hashtags should filter by category when provided."""
-        db.insert_hashtags(conn, city_id, ["food_tag"], category="food_and_drink")
-        db.insert_hashtags(conn, city_id, ["night_tag"], category="nightlife")
-        db.insert_hashtags(conn, city_id, ["generic_tag"])
+        # Explicitly pass both platforms to test category filtering
+        db.insert_hashtags(
+            conn, city_id, ["food_tag"], category="food_and_drink", platforms=("tiktok", "instagram")
+        )
+        db.insert_hashtags(
+            conn, city_id, ["night_tag"], category="nightlife", platforms=("tiktok", "instagram")
+        )
+        db.insert_hashtags(conn, city_id, ["generic_tag"], platforms=("tiktok", "instagram"))
 
         food = db.get_pending_hashtags(conn, city_id, category="food_and_drink")
         assert len(food) == 2  # 2 platforms

@@ -197,13 +197,23 @@ def main() -> None:
 
         # Repend completed hashtags if requested (for windowed re-scraping)
         if args.repend_hashtags:
-            repend_count = conn.execute(
-                "UPDATE hashtags SET scrape_status = 'pending' WHERE city_id = ? AND scrape_status = 'completed'",
-                (city_id,),
-            ).rowcount
+            # Only repend TikTok food_and_drink hashtags by default to avoid
+            # re-queuing Instagram and nightlife in the same actor call
+            repend_query = """
+                UPDATE hashtags 
+                SET scrape_status = 'pending' 
+                WHERE city_id = ? 
+                  AND scrape_status = 'completed'
+                  AND platform = 'tiktok'
+                  AND (category IS NULL OR category = 'food_and_drink')
+            """
+            repend_count = conn.execute(repend_query, (city_id,)).rowcount
             conn.commit()
             if repend_count:
-                log.info("Reset %d completed hashtags to pending for windowed re-scraping", repend_count)
+                log.info(
+                    "Reset %d completed TikTok food_and_drink hashtags to pending for windowed re-scraping",
+                    repend_count,
+                )
 
         # Step 1: Hashtag Generation
         from pipeline.hashtags import generate_hashtags
@@ -254,10 +264,16 @@ def main() -> None:
         log.info("Step 4/5: Deduplicating and scoring places...")
         deduplicate_and_score(conn, city_id, city_name)
 
-        # Step 5: Tourist Trap Filter
+        # Step 5a: Filter generic names and off-city locations
+        from pipeline.filter import filter_generic_and_off_city
+
+        log.info("Step 5a/5: Filtering generic names and off-city locations...")
+        filter_generic_and_off_city(conn, city_id, city_name)
+
+        # Step 5b: Tourist Trap Filter
         from pipeline.filter import filter_tourist_traps
 
-        log.info("Step 5/5: Filtering tourist traps...")
+        log.info("Step 5b/5: Filtering tourist traps...")
         filter_tourist_traps(conn, city_id, city_name)
 
         # Output
