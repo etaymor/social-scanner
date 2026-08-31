@@ -194,16 +194,47 @@ def test_replay_seoul_fixture_inserts_posts(conn, city_id):
     assert posts == inserted
 
 
-def test_ocr_fail_closed(monkeypatch, conn, city_id):
+def test_ocr_fallback_second_engine_succeeds(monkeypatch, conn, city_id):
+    """First OpenRouter model 404s; second returns venue names; no abort."""
     from pipeline import ocr
 
     conn.execute(
         "INSERT INTO raw_posts (city_id, platform, post_id, cover_url, caption, ocr_status) "
-        "VALUES (?, 'tiktok', ?, 'http://example.com/x.jpg', 'hi', 'pending')",
-        (city_id, "o1"),
+        "VALUES (?, 'tiktok', 'o1', 'http://example.com/x.jpg', 'hi', 'pending')",
+        (city_id,),
     )
-    # Need enough attempts — insert 5
-    for i in range(2, 7):
+    conn.commit()
+
+    monkeypatch.setattr(ocr.config, "OCR_USE_TESSERACT", False)
+    monkeypatch.setattr(ocr.config, "OCR_MODEL", "dead/model-404")
+    monkeypatch.setattr(ocr.config, "OCR_FALLBACK_MODELS", "live/vision-ok")
+    monkeypatch.setattr(ocr.config, "OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(ocr, "_download_image", lambda url, timeout=10: (b"fake-img", False))
+
+    def fake_openrouter(image_bytes, model):
+        if model == "dead/model-404":
+            return ocr._EngineResult(engine_error=True, engine=f"openrouter:{model}")
+        return ocr._EngineResult(
+            text="1. Hanmiok\n2. Solsot\n3. Odarijip",
+            engine=f"openrouter:{model}",
+        )
+
+    monkeypatch.setattr(ocr, "_ocr_openrouter", fake_openrouter)
+
+    enriched = ocr.extract_cover_text(conn, city_id, "Seoul")
+    assert enriched == 1
+    row = conn.execute("SELECT caption, ocr_status FROM raw_posts WHERE post_id = 'o1'").fetchone()
+    assert row["ocr_status"] == "done"
+    assert "Hanmiok" in row["caption"]
+    assert "Solsot" in row["caption"]
+    assert "🔤 On-screen text:" in row["caption"]
+
+
+def test_ocr_all_engines_down_continues_no_abort(monkeypatch, conn, city_id):
+    """All engines down → posts marked failed; extract_cover_text does not raise."""
+    from pipeline import ocr
+
+    for i in range(1, 7):
         conn.execute(
             "INSERT INTO raw_posts (city_id, platform, post_id, cover_url, caption, ocr_status) "
             "VALUES (?, 'tiktok', ?, 'http://example.com/x.jpg', 'hi', 'pending')",
@@ -211,7 +242,74 @@ def test_ocr_fail_closed(monkeypatch, conn, city_id):
         )
     conn.commit()
 
-    monkeypatch.setattr(ocr, "_process_one", lambda pid, urls: ocr._OCRAttempt(pid, http_error=True))
+    monkeypatch.setattr(ocr.config, "OCR_USE_TESSERACT", False)
+    monkeypatch.setattr(ocr.config, "OCR_MODEL", "dead/a")
+    monkeypatch.setattr(ocr.config, "OCR_FALLBACK_MODELS", "dead/b")
+    monkeypatch.setattr(ocr.config, "OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(ocr, "_download_image", lambda url, timeout=10: (b"fake-img", False))
+    monkeypatch.setattr(
+        ocr,
+        "_ocr_openrouter",
+        lambda image_bytes, model: ocr._EngineResult(
+            engine_error=True, engine=f"openrouter:{model}"
+        ),
+    )
 
-    with pytest.raises(ocr.OCRError):
-        ocr.extract_cover_text(conn, city_id, "Seoul", fail_closed=True)
+    # Must not raise — city run continues with failed OCR posts.
+    enriched = ocr.extract_cover_text(conn, city_id, "Seoul")
+    assert enriched == 0
+    statuses = [
+        r["ocr_status"]
+        for r in conn.execute("SELECT ocr_status FROM raw_posts WHERE city_id = ?", (city_id,))
+    ]
+    assert statuses == ["failed"] * 6
+
+
+def test_ocr_no_text_is_not_http_failure(monkeypatch, conn, city_id):
+    """Vision NO_TEXT marks post empty, not failed."""
+    from pipeline import ocr
+
+    conn.execute(
+        "INSERT INTO raw_posts (city_id, platform, post_id, cover_url, caption, ocr_status) "
+        "VALUES (?, 'tiktok', 'nt1', 'http://example.com/x.jpg', 'caption only', 'pending')",
+        (city_id,),
+    )
+    conn.commit()
+
+    monkeypatch.setattr(ocr.config, "OCR_USE_TESSERACT", False)
+    monkeypatch.setattr(ocr.config, "OCR_MODEL", "live/vision")
+    monkeypatch.setattr(ocr.config, "OCR_FALLBACK_MODELS", "")
+    monkeypatch.setattr(ocr.config, "OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(ocr, "_download_image", lambda url, timeout=10: (b"fake-img", False))
+    monkeypatch.setattr(
+        ocr,
+        "_ocr_openrouter",
+        lambda image_bytes, model: ocr._EngineResult(
+            authoritative_empty=True, engine=f"openrouter:{model}"
+        ),
+    )
+
+    enriched = ocr.extract_cover_text(conn, city_id, "Seoul")
+    assert enriched == 0
+    row = conn.execute(
+        "SELECT caption, ocr_status FROM raw_posts WHERE post_id = 'nt1'"
+    ).fetchone()
+    assert row["ocr_status"] == "empty"
+    assert "🔤 On-screen text:" not in (row["caption"] or "")
+
+
+def test_ocr_default_models_are_live_multimodal_not_image_gen():
+    """Defaults must be verified OpenRouter text/vision slugs, never *-flash-image*."""
+    import config as cfg
+
+    assert cfg.OCR_MODEL == "google/gemini-3.1-flash-lite"
+    assert "flash-image" not in cfg.OCR_MODEL
+    assert "gemini-2.0-flash" not in cfg.OCR_MODEL
+    assert cfg.OPENROUTER_MODEL == "google/gemini-3.1-flash-lite"
+    assert cfg.GEMINI_MODEL == "google/gemini-3.1-flash-image"
+    for mid in str(cfg.OCR_FALLBACK_MODELS).split(","):
+        mid = mid.strip()
+        if mid:
+            assert "flash-image" not in mid
+            assert mid != "google/gemini-3.1-flash"  # no such slug
+
