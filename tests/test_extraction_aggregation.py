@@ -7,10 +7,10 @@ import pytest
 
 from pipeline import db
 from pipeline.extractor import _build_numbered_captions, extract_places
-from pipeline.listicle import extract_named_places_heuristic
+from pipeline.listicle import extract_named_places_heuristic, is_overlay_junk
 from pipeline.city_saved_places import rank_repeating_saves
 from pipeline.replay import import_apify_json
-from pipeline.scorer import _find_candidate_pairs
+from pipeline.scorer import _find_candidate_pairs, _perform_dedup
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "seoul_apify_sample.json"
@@ -63,10 +63,39 @@ def test_ocr_overlay_junk_only_extracts_zero_places():
         "HERE\n"
         "delicious\n"
         "Korean beef barbecue\n"
-        "naengmyeon"
+        "naengmyeon\n"
+        "and even naengmyeon\n"
+        "10/10 mul naengmyeon\n"
+        "mul naengmyeon"
     )
     places = extract_named_places_heuristic(caption)
     assert places == []
+
+
+def test_dish_generic_as_head_phrases_are_junk():
+    """Dish-as-head lines are junk; exact token and fuzzy-collapse sources drop."""
+    for junk in (
+        "naengmyeon",
+        "and even naengmyeon",
+        "10/10 mul naengmyeon",
+        "mul naengmyeon",
+        "IN SEOUL",
+        "2F",
+        "HERE",
+    ):
+        assert is_overlay_junk(junk) is True, junk
+    assert is_overlay_junk("Myeongdong Kyoja") is False
+
+
+def test_and_even_naengmyeon_extracts_zero_places():
+    """Regression: 'and even naengmyeon' must not become a place (0 places)."""
+    caption = (
+        "Seoul eats\n"
+        "🔤 On-screen text:\n"
+        "and even naengmyeon\n"
+        "10/10 mul naengmyeon"
+    )
+    assert extract_named_places_heuristic(caption) == []
 
 
 def test_ocr_overlay_junk_plus_venue_keeps_kyoja_not_floor():
@@ -80,6 +109,8 @@ def test_ocr_overlay_junk_plus_venue_keeps_kyoja_not_floor():
         "delicious\n"
         "Korean beef barbecue\n"
         "naengmyeon\n"
+        "and even naengmyeon\n"
+        "10/10 mul naengmyeon\n"
         "Myeongdong Kyoja\n"
         "5F"
     )
@@ -95,12 +126,121 @@ def test_ocr_overlay_junk_plus_venue_keeps_kyoja_not_floor():
         "delicious",
         "Korean beef barbecue",
         "naengmyeon",
+        "and even naengmyeon",
+        "10/10 mul naengmyeon",
     ):
         assert junk not in names
         assert junk.lower() not in {n.lower() for n in names}
     # Only the venue — not a pile of overlay tokens
     assert len(places) == 1
     assert places[0]["name"] == "Myeongdong Kyoja"
+
+
+def test_rank_hides_overlay_junk_even_from_old_place_posts(conn, city_id):
+    """Leftover IN SEOUL / dish rows in DB must not appear in ranked export."""
+    city = conn.execute("SELECT name FROM cities WHERE id = ?", (city_id,)).fetchone()["name"]
+    # Simulate pre-filter leftovers with enough posts to pass the rank gate
+    junk_names = ("IN SEOUL", "in seoul", "naengmyeon", "and even naengmyeon", "2F", "HERE")
+    for j, name in enumerate(junk_names):
+        cur = conn.execute(
+            "INSERT INTO places (city_id, name, type, category, mention_count) "
+            "VALUES (?, ?, 'restaurant', 'food_and_drink', 5)",
+            (city_id, name),
+        )
+        place_id = cur.lastrowid
+        for i in range(3):
+            pcur = conn.execute(
+                "INSERT INTO raw_posts (city_id, platform, post_id, author, saves, caption, posted_at) "
+                "VALUES (?, 'tiktok', ?, ?, 50, 'overlay', datetime('now'))",
+                (city_id, f"junk_{j}_{i}", f"author_j_{j}_{i}"),
+            )
+            conn.execute(
+                "INSERT INTO place_posts (place_id, post_id) VALUES (?, ?)",
+                (place_id, pcur.lastrowid),
+            )
+
+    # Real venue that should still rank
+    cur = conn.execute(
+        "INSERT INTO places (city_id, name, type, category, mention_count) "
+        "VALUES (?, 'Myeongdong Kyoja', 'restaurant', 'food_and_drink', 4)",
+        (city_id,),
+    )
+    kyoja_id = cur.lastrowid
+    for i in range(3):
+        pcur = conn.execute(
+            "INSERT INTO raw_posts (city_id, platform, post_id, author, saves, caption, posted_at) "
+            "VALUES (?, 'tiktok', ?, ?, 80, '1. Myeongdong Kyoja', datetime('now'))",
+            (city_id, f"kyoja_{i}", f"author_k_{i}"),
+        )
+        conn.execute(
+            "INSERT INTO place_posts (place_id, post_id) VALUES (?, ?)",
+            (kyoja_id, pcur.lastrowid),
+        )
+    conn.commit()
+
+    ranked = rank_repeating_saves(city, category="food_and_drink", conn=conn)
+    names = {p.place.name for p in ranked.places}
+    assert "Myeongdong Kyoja" in names
+    for junk in junk_names:
+        assert junk not in names
+        assert junk.lower() not in {n.lower() for n in names}
+
+
+def test_merge_in_seoul_variants_not_in_ranked_output(conn, city_id):
+    """Fuzzy merge of IN SEOUL variants must not keep IN SEOUL as ranked canonical."""
+    city = conn.execute("SELECT name FROM cities WHERE id = ?", (city_id,)).fetchone()["name"]
+    conn.execute("UPDATE cities SET name = 'Seoul' WHERE id = ?", (city_id,))
+    city = "Seoul"
+
+    variants = ("IN SEOUL", "In Seoul", "in seoul", "SEOUL")
+    for j, name in enumerate(variants):
+        cur = conn.execute(
+            "INSERT INTO places (city_id, name, type, category, mention_count) "
+            "VALUES (?, ?, 'restaurant', 'food_and_drink', ?)",
+            (city_id, name, 10 - j),
+        )
+        place_id = cur.lastrowid
+        for i in range(2):
+            pcur = conn.execute(
+                "INSERT INTO raw_posts (city_id, platform, post_id, author, saves, caption, posted_at) "
+                "VALUES (?, 'tiktok', ?, ?, 40, 'overlay', datetime('now'))",
+                (city_id, f"seoul_v_{j}_{i}", f"auth_s_{j}_{i}"),
+            )
+            conn.execute(
+                "INSERT INTO place_posts (place_id, post_id) VALUES (?, ?)",
+                (place_id, pcur.lastrowid),
+            )
+
+    # Venue control
+    cur = conn.execute(
+        "INSERT INTO places (city_id, name, type, category, mention_count) "
+        "VALUES (?, 'Hanmiok', 'restaurant', 'food_and_drink', 3)",
+        (city_id,),
+    )
+    hid = cur.lastrowid
+    for i in range(2):
+        pcur = conn.execute(
+            "INSERT INTO raw_posts (city_id, platform, post_id, author, saves, caption, posted_at) "
+            "VALUES (?, 'tiktok', ?, ?, 60, '1. Hanmiok', datetime('now'))",
+            (city_id, f"han_{i}", f"auth_h_{i}"),
+        )
+        conn.execute(
+            "INSERT INTO place_posts (place_id, post_id) VALUES (?, ?)",
+            (hid, pcur.lastrowid),
+        )
+    conn.commit()
+
+    # Dedup must not promote junk; even if leftovers remain, rank hides them
+    _perform_dedup(conn, city_id, city)
+    conn.commit()
+
+    ranked = rank_repeating_saves(city, category="food_and_drink", conn=conn)
+    ranked_names = {p.place.name for p in ranked.places}
+    assert "Hanmiok" in ranked_names
+    for junk in ("IN SEOUL", "In Seoul", "in seoul", "SEOUL", "Seoul"):
+        assert junk not in ranked_names
+    # Never promote junk as the sole survivor that then ranks
+    assert not any(is_overlay_junk(n) for n in ranked_names)
 
 
 def test_onscreen_and_bullet_formats():

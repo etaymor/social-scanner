@@ -33,9 +33,13 @@ def validate_city(city_name: str) -> str:
 def print_summary(
     conn: sqlite3.Connection, city_id: int, city_name: str, category: str | None = None
 ) -> None:
+    from pipeline.listicle import is_overlay_junk
+
     stats = db.get_city_stats(conn, city_id)
     places = db.get_all_places(conn, city_id)
-    non_traps = [p for p in places if not p["is_tourist_trap"]]
+    non_traps = [
+        p for p in places if not p["is_tourist_trap"] and not is_overlay_junk(p["name"])
+    ]
 
     print(f"\n{'=' * 50}")
     print(f"  Atlasi Place Discovery: {city_name}")
@@ -75,8 +79,12 @@ def _safe_get(row_or_dict, key: str, default=None):
 def export_csv(
     conn: sqlite3.Connection, city_id: int, city_name: str, filepath: str | None = None
 ) -> str:
+    from pipeline.listicle import is_overlay_junk
+
     places = db.get_all_places(conn, city_id)
-    non_traps = [p for p in places if not p["is_tourist_trap"]]
+    non_traps = [
+        p for p in places if not p["is_tourist_trap"] and not is_overlay_junk(p["name"])
+    ]
 
     if not filepath:
         safe_name = city_name.lower().replace(" ", "_")

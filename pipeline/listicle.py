@@ -140,12 +140,97 @@ _DISH_GENERIC = frozenset(
     }
 )
 
+# Longest dish phrases first so "korean beef barbecue" wins over "barbecue"
+_DISH_GENERIC_SORTED = tuple(sorted(_DISH_GENERIC, key=len, reverse=True))
+
+# Modifiers / chrome around a dish head that still leave no venue proper name
+_DISH_HEAD_NOISE = frozenset(
+    {
+        "mul",
+        "bibim",
+        "hoe",
+        "spicy",
+        "hot",
+        "cold",
+        "fried",
+        "grilled",
+        "and",
+        "even",
+        "some",
+        "the",
+        "a",
+        "an",
+        "with",
+        "of",
+        "my",
+        "our",
+        "best",
+        "famous",
+        "classic",
+        "traditional",
+        "fresh",
+        "good",
+        "great",
+        "try",
+        "tried",
+        "eating",
+        "eat",
+        "had",
+        "was",
+        "is",
+        "so",
+        "very",
+        "really",
+        "also",
+        "just",
+        "only",
+        "order",
+        "ordered",
+        "get",
+        "got",
+        "this",
+        "that",
+        "their",
+        "its",
+    }
+)
+
+# Score / rating chrome: "10/10", "5/5", "100%", standalone digits
+_RATING_TOKEN = re.compile(r"^\d+(?:[./]\d+)?%?$")
+
+
+def _dish_generic_as_head_without_venue(lower: str) -> bool:
+    """True when *lower* is a dish phrase (optionally with modifiers) and no venue.
+
+    Catches ``and even naengmyeon``, ``10/10 mul naengmyeon``, ``mul naengmyeon``.
+    Keeps names that still have a distinct proper-name token after the dish is
+    stripped (e.g. ``Myeongdong Kyoja`` alone, or ``Kyoja naengmyeon``).
+    """
+    for dish in _DISH_GENERIC_SORTED:
+        if not re.search(rf"(?<!\w){re.escape(dish)}(?!\w)", lower):
+            continue
+        remainder = re.sub(rf"(?<!\w){re.escape(dish)}(?!\w)", " ", lower)
+        tokens = [t for t in re.split(r"[^a-z0-9가-힣]+", remainder) if t]
+        meaningful: list[str] = []
+        for tok in tokens:
+            if tok in _DISH_HEAD_NOISE or tok in _FILLER or tok in _SKIP:
+                continue
+            if _RATING_TOKEN.match(tok):
+                continue
+            if len(tok) < 2:
+                continue
+            meaningful.append(tok)
+        if not meaningful:
+            return True
+    return False
+
 
 def is_overlay_junk(name: str) -> bool:
     """True if *name* is OCR/overlay chrome, not a venue.
 
     Drops floor numbers, city-only labels, English filler, and dish generics
-    without a venue. Proper names (e.g. ``Myeongdong Kyoja``) return False.
+    without a venue (including dish-as-head lines like ``mul naengmyeon``).
+    Proper names (e.g. ``Myeongdong Kyoja``) return False.
     """
     cleaned = re.sub(r"\s+", " ", name).strip()
     if not cleaned:
@@ -156,6 +241,8 @@ def is_overlay_junk(name: str) -> bool:
     if _FLOOR_ONLY.match(cleaned):
         return True
     if _CITY_ONLY.match(cleaned):
+        return True
+    if _dish_generic_as_head_without_venue(lower):
         return True
     return False
 
