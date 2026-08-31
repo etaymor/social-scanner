@@ -297,14 +297,11 @@ def main() -> None:
                 "Step 2.5: Skipping OCR (--skip-ocr). On-screen venue names will be missing."
             )
         else:
-            from pipeline.ocr import OCRError, extract_cover_text
+            from pipeline.ocr import extract_cover_text
 
             log.info("Step 2.5: Running visual OCR on cover/slideshow images...")
-            try:
-                extract_cover_text(conn, city_id, city_name)
-            except OCRError as e:
-                print(f"\n  OCR failed closed: {e}\n", file=sys.stderr)
-                sys.exit(2)
+            # Never fail-closed: engine 404s fall through; gaps mark posts failed.
+            extract_cover_text(conn, city_id, city_name)
 
         # Step 3: Place Extraction
         from pipeline.extractor import extract_places

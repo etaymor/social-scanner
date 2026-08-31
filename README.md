@@ -84,16 +84,20 @@ A place discovery pipeline that:
    ```env
    APIFY_API_TOKEN=your_apify_token
    OPENROUTER_API_KEY=your_openrouter_key
-   OPENROUTER_MODEL=anthropic/claude-sonnet-4
+   OPENROUTER_MODEL=google/gemini-3.1-flash-lite
+   OCR_MODEL=google/gemini-3.1-flash-lite
+   GEMINI_MODEL=google/gemini-3.1-flash-image
    ```
 
-   | Variable             | Required | Default                     | Description                        |
-   | -------------------- | -------- | --------------------------- | ---------------------------------- |
-   | `APIFY_API_TOKEN`    | Yes      | —                           | Your Apify API token               |
-   | `OPENROUTER_API_KEY` | Yes      | —                           | Your OpenRouter API key            |
-   | `OPENROUTER_MODEL`   | No       | `anthropic/claude-sonnet-4` | LLM model to use via OpenRouter    |
-   | `DB_PATH`            | No       | `places.db`                 | Path to the SQLite database file   |
-   | `FLASK_DEBUG`        | No       | `false`                     | Set to `true` for Flask debug mode |
+   | Variable             | Required | Default                          | Description                                      |
+   | -------------------- | -------- | -------------------------------- | ------------------------------------------------ |
+   | `APIFY_API_TOKEN`    | Yes      | —                                | Your Apify API token                             |
+   | `OPENROUTER_API_KEY` | Yes      | —                                | Your OpenRouter API key                          |
+   | `OPENROUTER_MODEL`   | No       | `google/gemini-3.1-flash-lite`   | Caption extract / JSON via OpenRouter            |
+   | `OCR_MODEL`          | No       | `google/gemini-3.1-flash-lite`   | Vision OCR primary (not `*-flash-image`)         |
+   | `GEMINI_MODEL`       | No       | `google/gemini-3.1-flash-image`  | Slideshow image gen only (Nano Banana 2)         |
+   | `DB_PATH`            | No       | `places.db`                      | Path to the SQLite database file                 |
+   | `FLASK_DEBUG`        | No       | `false`                          | Set to `true` for Flask debug mode               |
 
 ## Running the Pipeline
 

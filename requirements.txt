@@ -5,3 +5,4 @@ rapidfuzz>=3.9.0
 flask>=3.1.0
 pytest>=8.0.0
 Pillow>=12.1.1
+pytesseract>=0.3.10

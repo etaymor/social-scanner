@@ -12,7 +12,9 @@ APIFY_API_TOKEN = os.getenv("APIFY_API_TOKEN", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
 # OpenRouter
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "anthropic/claude-sonnet-4")
+# Caption extract / JSON — multimodal text model (not image-gen).
+# OpenRouter has no google/gemini-3.1-flash slug; Flash Lite is the live 3.1 default.
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "google/gemini-3.1-flash-lite")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_MAX_RETRIES = 3
 OPENROUTER_RETRY_BASE_DELAY = 2  # seconds
@@ -43,13 +45,26 @@ WEIGHT_LIKES = 1.0
 # Google Places API (real photo sourcing — falls back to AI if unset)
 GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY", "")
 
-# Gemini (image generation via OpenRouter)
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "google/gemini-3.1-flash-image-preview")
+# Gemini image generation via OpenRouter (Nano Banana 2 — image-out only).
+# Never use *-flash-image* models for OCR or caption extraction.
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "google/gemini-3.1-flash-image")
 GEMINI_MAX_RETRIES = 2
 GEMINI_TIMEOUT = 120  # seconds
 
-# Visual OCR model (cover / slideshow on-screen text)
-OCR_MODEL = os.getenv("OCR_MODEL", "google/gemini-2.0-flash-001")
+# Visual OCR — fallback chain (local Tesseract first, then OpenRouter vision).
+# No google/gemini-3.1-flash slug on OpenRouter; use Flash Lite (multimodal text-out).
+# Never point OCR at flash-image / lite-image (image generation only).
+OCR_MODEL = os.getenv("OCR_MODEL", "google/gemini-3.1-flash-lite")
+OCR_FALLBACK_MODELS = os.getenv(
+    "OCR_FALLBACK_MODELS",
+    "google/gemini-3-flash-preview",
+)
+OCR_USE_TESSERACT = os.getenv("OCR_USE_TESSERACT", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+OCR_TESSERACT_LANG = os.getenv("OCR_TESSERACT_LANG", "eng+kor")
 
 # Postiz (TikTok posting)
 POSTIZ_API_KEY = os.getenv("POSTIZ_API_KEY", "")

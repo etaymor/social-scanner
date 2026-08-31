@@ -150,7 +150,7 @@ class TestGenerateImage:
         generate_image("a mountain sunset", out)
 
         payload = mock_post.call_args[1]["json"]
-        assert payload["model"] == "google/gemini-3.1-flash-image-preview"
+        assert payload["model"] == "google/gemini-3.1-flash-image"
         assert payload["modalities"] == ["image", "text"]
         assert payload["image_config"]["aspect_ratio"] == "9:16"
         assert payload["image_config"]["image_size"] == "2K"
