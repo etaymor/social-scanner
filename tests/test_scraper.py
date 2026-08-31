@@ -92,6 +92,48 @@ class TestTikTokMapping:
         assert "bob" in result["url"]
         assert "abc" in result["url"]
 
+    def test_slideshow_urls_include_tiktok_link_frames(self):
+        """Apify slideshowImageLinks use tiktokLink — all frames must be captured."""
+        item = {
+            "id": "ss",
+            "isSlideshow": True,
+            "slideshowImageLinks": [
+                {
+                    "tiktokLink": "https://cdn.example/frame0.jpg",
+                    "downloadLink": "https://cdn.example/frame0.jpg",
+                },
+                {"tiktokLink": "https://cdn.example/frame1.jpg"},
+                {"tiktokLink": "https://cdn.example/frame2.jpg"},
+            ],
+            "videoMeta": {"coverUrl": "https://cdn.example/cover.jpg"},
+        }
+        result = _map_tiktok(item)
+        frames = result["slideshow_urls"].split("\n")
+        assert len(frames) == 3
+        assert frames[0].endswith("frame0.jpg")
+        assert frames[2].endswith("frame2.jpg")
+
+    def test_video_url_from_download_addr(self):
+        item = {
+            "id": "v1",
+            "downloadAddr": "https://cdn.example/video.mp4",
+            "videoUrl": "https://www.tiktok.com/@u/video/v1",
+            "videoMeta": {"coverUrl": "https://cdn.example/cover.jpg", "duration": 12},
+        }
+        result = _map_tiktok(item)
+        assert result["video_url"] == "https://cdn.example/video.mp4"
+        # Page URL must never be stored as video_url
+        assert "tiktok.com/@" not in (result["video_url"] or "")
+
+    def test_page_video_url_not_treated_as_download(self):
+        item = {
+            "id": "v2",
+            "videoUrl": "https://www.tiktok.com/@u/video/v2",
+            "webVideoUrl": "https://www.tiktok.com/@u/video/v2",
+        }
+        result = _map_tiktok(item)
+        assert result["video_url"] == ""
+
 
 class TestInstagramMapping:
     def test_basic_mapping(self):

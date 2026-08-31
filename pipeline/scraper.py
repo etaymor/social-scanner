@@ -60,26 +60,74 @@ def _subtitle_urls(video_meta: dict) -> str:
     return "\n".join(urls)
 
 
+def _is_direct_media_url(url: str) -> bool:
+    """True for CDN / file URLs; false for TikTok HTML page links."""
+    u = (url or "").strip().lower()
+    if not u.startswith("http"):
+        return False
+    if "tiktok.com/@" in u or "tiktok.com/video/" in u or "/photo/" in u:
+        return False
+    return True
+
+
+def _url_from_media_entry(entry: object) -> str:
+    """Pull a downloadable image URL from a string or Apify slideshow dict."""
+    if isinstance(entry, str) and entry.strip():
+        return entry.strip()
+    if isinstance(entry, dict):
+        for key in (
+            "downloadLink",
+            "tiktokLink",
+            "url",
+            "imageUrl",
+            "displayImage",
+            "imageURL",
+        ):
+            u = entry.get(key) or ""
+            if isinstance(u, str) and u.strip():
+                return u.strip()
+    return ""
+
+
 def _slideshow_urls(item: dict) -> str:
-    """Collect slideshow / carousel image URLs when the actor provides them."""
+    """Collect ALL slideshow / photo-mode frame URLs when the actor provides them."""
     urls: list[str] = []
     media = item.get("mediaUrls") or []
     if isinstance(media, list):
-        for u in media:
-            if isinstance(u, str) and u.strip():
-                urls.append(u.strip())
-    # Some actor builds nest slideshow images here
-    for key in ("slideshowImageLinks", "imageUrls"):
+        for entry in media:
+            u = _url_from_media_entry(entry)
+            # Skip video mp4s in mediaUrls — those belong in video_url
+            if u and not u.lower().split("?", 1)[0].endswith((".mp4", ".mov", ".m4v", ".webm")):
+                urls.append(u)
+    for key in ("slideshowImageLinks", "imageUrls", "slideshowImages", "images"):
         extra = item.get(key) or []
         if isinstance(extra, list):
             for entry in extra:
-                if isinstance(entry, str) and entry.strip():
-                    urls.append(entry.strip())
-                elif isinstance(entry, dict):
-                    u = entry.get("url") or entry.get("downloadLink") or ""
-                    if u:
-                        urls.append(u.strip())
-    # Dedupe preserve order
+                u = _url_from_media_entry(entry)
+                if u:
+                    urls.append(u)
+    # Nested photo-mode payloads some actor builds emit
+    image_post = item.get("imagePost") or {}
+    if isinstance(image_post, dict):
+        for entry in image_post.get("images") or []:
+            if isinstance(entry, dict):
+                # imageURL / imageURLList variants
+                u = _url_from_media_entry(entry)
+                if not u:
+                    for nest_key in ("imageURL", "imageUrl"):
+                        nest = entry.get(nest_key)
+                        if isinstance(nest, dict):
+                            u = _url_from_media_entry(nest)
+                        elif isinstance(nest, list) and nest:
+                            u = _url_from_media_entry(nest[0])
+                        if u:
+                            break
+                if u:
+                    urls.append(u)
+            else:
+                u = _url_from_media_entry(entry)
+                if u:
+                    urls.append(u)
     seen: set[str] = set()
     out: list[str] = []
     for u in urls:
@@ -87,6 +135,31 @@ def _slideshow_urls(item: dict) -> str:
             seen.add(u)
             out.append(u)
     return "\n".join(out)
+
+
+def _video_url(item: dict) -> str:
+    """Direct downloadable video URL when present — never the HTML page link."""
+    candidates: list[str] = []
+    for key in ("downloadAddr", "videoDownloadUrl", "videoUrl"):
+        u = item.get(key)
+        if isinstance(u, str) and u.strip():
+            candidates.append(u.strip())
+    video_meta = item.get("videoMeta") or {}
+    if isinstance(video_meta, dict):
+        for key in ("downloadAddr", "playAddr", "videoUrl", "downloadLink"):
+            u = video_meta.get(key)
+            if isinstance(u, str) and u.strip():
+                candidates.append(u.strip())
+    media = item.get("mediaUrls") or []
+    if isinstance(media, list):
+        for entry in media:
+            u = _url_from_media_entry(entry)
+            if u and u.lower().split("?", 1)[0].endswith((".mp4", ".mov", ".m4v", ".webm")):
+                candidates.append(u)
+    for u in candidates:
+        if _is_direct_media_url(u):
+            return u
+    return ""
 
 
 def _map_tiktok(item: dict) -> dict:
@@ -109,8 +182,10 @@ def _map_tiktok(item: dict) -> dict:
             location_parts.append(loc_addr)
         caption += f"\n📍 Location tag: {', '.join(location_parts)}"
 
-    # Get cover image URL for visual OCR
+    # Cover + media timeline fields for visual OCR (slideshow frames / video URL)
     video_meta = item.get("videoMeta") or {}
+    if not isinstance(video_meta, dict):
+        video_meta = {}
     cover_url = video_meta.get("coverUrl") or video_meta.get("originalCoverUrl") or ""
 
     # Get collectCount from top-level OR stats (fallback)
@@ -132,6 +207,7 @@ def _map_tiktok(item: dict) -> dict:
         "cover_url": cover_url,
         "subtitle_urls": _subtitle_urls(video_meta),
         "slideshow_urls": _slideshow_urls(item),
+        "video_url": _video_url(item),
     }
 
 

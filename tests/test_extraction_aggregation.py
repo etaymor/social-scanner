@@ -312,4 +312,230 @@ def test_ocr_default_models_are_live_multimodal_not_image_gen():
         if mid:
             assert "flash-image" not in mid
             assert mid != "google/gemini-3.1-flash"  # no such slug
+    assert 1.0 <= float(cfg.OCR_VIDEO_FRAME_INTERVAL) <= 2.0
 
+
+def test_ocr_slideshow_all_n_frames_not_cover_only(monkeypatch, conn, city_id):
+    """Slideshow with N frames OCRs all N; cover-only text is not sufficient."""
+    from pipeline import ocr
+
+    n = 5
+    frame_urls = [f"http://cdn.example/slide_{i}.jpg" for i in range(n)]
+    conn.execute(
+        "INSERT INTO raw_posts "
+        "(city_id, platform, post_id, cover_url, slideshow_urls, caption, ocr_status) "
+        "VALUES (?, 'tiktok', 'ss1', 'http://cdn.example/COVER_ONLY.jpg', ?, 'list', 'pending')",
+        (city_id, "\n".join(frame_urls)),
+    )
+    conn.commit()
+
+    monkeypatch.setattr(ocr.config, "OCR_USE_TESSERACT", False)
+    monkeypatch.setattr(ocr.config, "OCR_MODEL", "live/vision")
+    monkeypatch.setattr(ocr.config, "OCR_FALLBACK_MODELS", "")
+    monkeypatch.setattr(ocr.config, "OPENROUTER_API_KEY", "test-key")
+
+    downloaded: list[str] = []
+
+    def fake_download(url, timeout=10):
+        downloaded.append(url)
+        return (f"bytes:{url}".encode(), False)
+
+    ocr_calls: list[bytes] = []
+
+    def fake_openrouter(image_bytes, model):
+        ocr_calls.append(image_bytes)
+        # Cover would say COVER_ONLY — frames carry distinct venue names.
+        label = image_bytes.decode()
+        idx = label.rsplit("_", 1)[-1].replace(".jpg", "")
+        return ocr._EngineResult(
+            text=f"Venue Frame {idx}",
+            engine=f"openrouter:{model}",
+        )
+
+    monkeypatch.setattr(ocr, "_download_image", fake_download)
+    monkeypatch.setattr(ocr, "_ocr_openrouter", fake_openrouter)
+
+    enriched = ocr.extract_cover_text(conn, city_id, "Seoul")
+    assert enriched == 1
+    # FAIL if cover-only: must OCR every slideshow frame, not just COVER_ONLY.
+    assert len(ocr_calls) == n
+    assert "COVER_ONLY" not in "".join(downloaded)
+    assert downloaded == frame_urls
+
+    row = conn.execute(
+        "SELECT caption, ocr_status FROM raw_posts WHERE post_id = 'ss1'"
+    ).fetchone()
+    assert row["ocr_status"] == "done"
+    for i in range(n):
+        assert f"Venue Frame {i}" in row["caption"]
+    assert "COVER_ONLY" not in row["caption"]
+
+
+def test_ocr_video_samples_approx_duration_over_interval(monkeypatch, conn, city_id, tmp_path):
+    """Synthetic video of known duration → ~duration/1.5 frames (± 1–2s band)."""
+    import subprocess
+
+    from pipeline import ocr
+
+    duration = 6.0
+    interval = 1.5
+    video_path = tmp_path / "synthetic.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=black:s=320x240:d={duration}",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libx264",
+            str(video_path),
+        ],
+        check=True,
+    )
+    video_bytes = video_path.read_bytes()
+    assert video_bytes
+
+    # Direct unit: frame sampler must not collapse to a single cover-like frame.
+    frames = ocr.sample_video_frames(video_bytes, interval=interval)
+    expected = duration / interval
+    # Tolerance spanning the settled 1–2s sampling band.
+    assert duration / 2.0 <= len(frames) <= duration / 1.0 + 1
+    assert abs(len(frames) - expected) <= 1.5
+    assert len(frames) >= 3  # cover-only would be 1
+
+    conn.execute(
+        "INSERT INTO raw_posts "
+        "(city_id, platform, post_id, cover_url, video_url, caption, ocr_status) "
+        "VALUES (?, 'tiktok', 'vid1', 'http://cdn.example/COVER_ONLY.jpg', "
+        "'http://cdn.example/clip.mp4', 'vcap', 'pending')",
+        (city_id,),
+    )
+    conn.commit()
+
+    monkeypatch.setattr(ocr.config, "OCR_USE_TESSERACT", False)
+    monkeypatch.setattr(ocr.config, "OCR_MODEL", "live/vision")
+    monkeypatch.setattr(ocr.config, "OCR_FALLBACK_MODELS", "")
+    monkeypatch.setattr(ocr.config, "OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(ocr.config, "OCR_VIDEO_FRAME_INTERVAL", interval)
+    monkeypatch.setattr(
+        ocr, "_download_video", lambda url, timeout=60: (video_bytes, False)
+    )
+    # Cover download must not be the path used when video_url is present.
+    monkeypatch.setattr(
+        ocr,
+        "_download_image",
+        lambda url, timeout=10: (_ for _ in ()).throw(
+            AssertionError(f"cover-only path hit for {url}")
+        ),
+    )
+
+    ocr_calls: list[int] = []
+
+    def fake_openrouter(image_bytes, model):
+        ocr_calls.append(len(image_bytes))
+        return ocr._EngineResult(
+            text=f"VideoVenue{len(ocr_calls)}",
+            engine=f"openrouter:{model}",
+        )
+
+    monkeypatch.setattr(ocr, "_ocr_openrouter", fake_openrouter)
+
+    enriched = ocr.extract_cover_text(conn, city_id, "Seoul")
+    assert enriched == 1
+    assert duration / 2.0 <= len(ocr_calls) <= duration / 1.0 + 1
+    assert abs(len(ocr_calls) - expected) <= 1.5
+    assert len(ocr_calls) >= 3
+
+    row = conn.execute(
+        "SELECT caption FROM raw_posts WHERE post_id = 'vid1'"
+    ).fetchone()
+    assert "VideoVenue1" in row["caption"]
+    assert "COVER_ONLY" not in row["caption"]
+
+
+def test_ocr_partial_frame_404_city_run_continues(monkeypatch, conn, city_id):
+    """Some slideshow frames 404 → remaining frames still enrich; no abort."""
+    from pipeline import ocr
+
+    urls = [
+        "http://cdn.example/ok_0.jpg",
+        "http://cdn.example/missing_1.jpg",
+        "http://cdn.example/ok_2.jpg",
+        "http://cdn.example/missing_3.jpg",
+    ]
+    conn.execute(
+        "INSERT INTO raw_posts "
+        "(city_id, platform, post_id, cover_url, slideshow_urls, caption, ocr_status) "
+        "VALUES (?, 'tiktok', 'partial1', 'http://cdn.example/COVER.jpg', ?, 'p', 'pending')",
+        (city_id, "\n".join(urls)),
+    )
+    conn.commit()
+
+    monkeypatch.setattr(ocr.config, "OCR_USE_TESSERACT", False)
+    monkeypatch.setattr(ocr.config, "OCR_MODEL", "live/vision")
+    monkeypatch.setattr(ocr.config, "OCR_FALLBACK_MODELS", "")
+    monkeypatch.setattr(ocr.config, "OPENROUTER_API_KEY", "test-key")
+
+    def fake_download(url, timeout=10):
+        if "missing" in url:
+            return None, True
+        return (f"bytes:{url}".encode(), False)
+
+    def fake_openrouter(image_bytes, model):
+        label = image_bytes.decode()
+        return ocr._EngineResult(
+            text=f"OK from {label}",
+            engine=f"openrouter:{model}",
+        )
+
+    monkeypatch.setattr(ocr, "_download_image", fake_download)
+    monkeypatch.setattr(ocr, "_ocr_openrouter", fake_openrouter)
+
+    # Must not raise — city run continues.
+    enriched = ocr.extract_cover_text(conn, city_id, "Seoul")
+    assert enriched == 1
+    row = conn.execute(
+        "SELECT caption, ocr_status FROM raw_posts WHERE post_id = 'partial1'"
+    ).fetchone()
+    assert row["ocr_status"] == "done"
+    assert "ok_0" in row["caption"]
+    assert "ok_2" in row["caption"]
+    assert "COVER.jpg" not in row["caption"]
+
+
+def test_media_timeline_prefers_slideshow_over_cover():
+    from pipeline.ocr import media_timeline_for_post
+
+    refs = media_timeline_for_post(
+        {
+            "cover_url": "http://x/cover.jpg",
+            "slideshow_urls": "http://x/a.jpg\nhttp://x/b.jpg",
+            "video_url": "http://x/v.mp4",
+            "url": "https://www.tiktok.com/@u/video/1",
+        }
+    )
+    assert [r.url for r in refs] == ["http://x/a.jpg", "http://x/b.jpg"]
+    assert all(r.kind == "image_url" for r in refs)
+
+
+def test_media_timeline_prefers_video_over_cover():
+    from pipeline.ocr import media_timeline_for_post
+
+    refs = media_timeline_for_post(
+        {
+            "cover_url": "http://x/cover.jpg",
+            "slideshow_urls": "",
+            "video_url": "http://cdn.example/v.mp4",
+            "url": "https://www.tiktok.com/@u/video/1",
+        }
+    )
+    assert len(refs) == 1
+    assert refs[0].kind == "video_url"
+    assert refs[0].url == "http://cdn.example/v.mp4"
