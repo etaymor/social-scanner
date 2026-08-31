@@ -12,6 +12,11 @@ build/
 .venv/
 venv/
 slideshows/
+artifacts/
+*_last_*_days.json
+*_last_*_days.csv
+*_places.csv
+
 docs/larry-1.0.0/
 docs/*.png
 docs/*.jpg

@@ -48,6 +48,9 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "google/gemini-3.1-flash-image-preview"
 GEMINI_MAX_RETRIES = 2
 GEMINI_TIMEOUT = 120  # seconds
 
+# Visual OCR model (cover / slideshow on-screen text)
+OCR_MODEL = os.getenv("OCR_MODEL", "google/gemini-2.0-flash-001")
+
 # Postiz (TikTok posting)
 POSTIZ_API_KEY = os.getenv("POSTIZ_API_KEY", "")
 POSTIZ_BASE_URL = "https://api.postiz.com/public/v1"

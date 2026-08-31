@@ -129,11 +129,11 @@ def test_rank_repeating_saves_with_window(conn, city_id):
 
 
 def test_rank_repeating_saves_gates(conn, city_id):
-    """Test that places with <2 posts or <2 authors are filtered out."""
+    """Test author/post gates. Default author gate is 1; pass 2 for strict mode."""
     now = datetime.now(timezone.utc)
     recent_date = (now - timedelta(days=5)).isoformat()
-    
-    # Place 1: 3 posts but only 1 author (should be filtered)
+
+    # Place 1: 3 posts but only 1 author
     cur = conn.execute(
         "INSERT INTO places (city_id, name, type, category, mention_count, virality_score) "
         "VALUES (?, 'Single Author Cafe', 'cafe', 'food_and_drink', 3, 0.5)",
@@ -151,8 +151,8 @@ def test_rank_repeating_saves_gates(conn, city_id):
             "INSERT INTO place_posts (place_id, post_id) VALUES (?, ?)",
             (place1_id, post_id),
         )
-    
-    # Place 2: 3 posts with 3 authors (should pass)
+
+    # Place 2: 3 posts with 3 authors (should always pass)
     cur = conn.execute(
         "INSERT INTO places (city_id, name, type, category, mention_count, virality_score) "
         "VALUES (?, 'Multi Author Ramen', 'restaurant', 'food_and_drink', 3, 0.8)",
@@ -170,15 +170,23 @@ def test_rank_repeating_saves_gates(conn, city_id):
             "INSERT INTO place_posts (place_id, post_id) VALUES (?, ?)",
             (place2_id, post_id),
         )
-    
+
     conn.commit()
-    
+
     city_name = conn.execute("SELECT name FROM cities WHERE id = ?", (city_id,)).fetchone()["name"]
-    result = rank_repeating_saves(city_name, category="food_and_drink", conn=conn)
-    
-    # Only Place 2 should pass the gates
-    assert len(result.places) == 1
-    assert result.places[0].place.name == "Multi Author Ramen"
+
+    # Strict independent-author gate (legacy Seoul/Tokyo runs)
+    strict = rank_repeating_saves(
+        city_name, category="food_and_drink", min_distinct_authors=2, conn=conn
+    )
+    assert len(strict.places) == 1
+    assert strict.places[0].place.name == "Multi Author Ramen"
+
+    # Default gate (min authors=1) keeps real multi-post repeats from one guide
+    default = rank_repeating_saves(city_name, category="food_and_drink", conn=conn)
+    names = {p.place.name for p in default.places}
+    assert names == {"Single Author Cafe", "Multi Author Ramen"}
+
 
 
 def test_rank_repeating_saves_excludes_neighborhood_and_street(conn, city_id):

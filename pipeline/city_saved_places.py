@@ -1,18 +1,10 @@
-"""City-level "repeating saves" ranking — interface sketch only.
+"""City-level repeating-saves ranking for Atlasi city guides.
 
-NOT IMPLEMENTED. See docs/city-saved-places.md.
+Ranks places by distinct posts / authors + collectCount bonus — not by
+``virality_score``. See docs/city-saved-places.md for method limitations.
 
-This module is the extension surface for a later job:
-
-    city in → durable place records → ranked "keeps repeating as a save"
-    list → JSON/CSV export for Atlasi
-
-Do not implement the ranker inside ``pipeline.scorer`` (that score is
-engagement-rate virality for slideshows). Do not scrape user bookmark
-lists. Do not generate an Atlasi page or a guide slideshow here.
-
-Fill these types in on the Tokyo-first build. Live Apify / OpenRouter
-runs stay in ``discover.py``.
+Live Apify / OpenRouter runs stay in ``discover.py``; use ``--from-json`` to
+replay an existing dataset without spending.
 """
 
 from __future__ import annotations
@@ -125,85 +117,79 @@ def rank_repeating_saves(
     category: str | None = None,
     *,
     min_distinct_posts: int = 2,
-    min_distinct_authors: int = 2,
+    min_distinct_authors: int = 1,
     window_days: int | None = None,
     conn: object | None = None,
+    include_near_misses: bool = False,
 ) -> CityGuideExport:
-    """Read resolved places + source posts for ``city`` and return a ranked export.
+    """Read places + source posts for ``city`` and return a ranked export.
 
     Must not use ``places.virality_score`` as the published rank.
-    Must skip rows with resolution_status other than ``resolved``.
-    
-    When window_days is set, only counts posts within that time window.
-    If conn is provided, uses that connection instead of opening a new one.
+
+    Default gate: ≥2 distinct posts. Author gate defaults to 1 so a venue that
+    truly repeats across videos from one guide account is not dropped — the
+    previous ≥2 authors AND ≥2 posts gate hid real multi-mention venues when
+    extraction split aliases. Pass ``min_distinct_authors=2`` for the stricter
+    independent-author bar.
     """
     import sqlite3
     from datetime import datetime, timedelta, timezone
     from . import db
-    
+
     own_conn = conn is None
     if own_conn:
         conn = db.get_connection()
     try:
-        # Get city_id
         city_row = conn.execute("SELECT id FROM cities WHERE name = ?", (city,)).fetchone()
         if not city_row:
             raise ValueError(f"City not found: {city}")
         city_id = city_row["id"]
-        
-        # Build WHERE clause for category and window filtering
-        # Skip hidden places AND tourist traps (which includes generic/off-city places)
+
         where_parts = ["p.city_id = ?", "p.hidden = FALSE", "p.is_tourist_trap = FALSE"]
-        params = [city_id]
-        
+        params: list = [city_id]
+
         if category:
             where_parts.append("p.category = ?")
             params.append(category)
-        
-        # Get all places (excluding neighborhoods and streets per design doc)
+
         where_parts.append("p.type NOT IN ('neighborhood', 'street')")
         where_clause = " AND ".join(where_parts)
-        
-        places_query = f"SELECT * FROM places p WHERE {where_clause} ORDER BY p.name"
-        places = conn.execute(places_query, params).fetchall()
-        
-        # Compute cutoff date if window is specified
+
+        places = conn.execute(
+            f"SELECT * FROM places p WHERE {where_clause} ORDER BY p.name",
+            params,
+        ).fetchall()
+
         cutoff_date = None
         if window_days is not None:
             cutoff_date = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat()
-        
+
         ranked: list[RankedPlace] = []
-        
+        near_misses: list[RankedPlace] = []
+
         for place in places:
             place_id = place["id"]
-            
-            # Get source posts for this place within the window
+
             post_query = """
-                SELECT DISTINCT rp.author, rp.saves, rp.url, rp.posted_at
+                SELECT DISTINCT rp.id, rp.author, rp.saves, rp.url, rp.posted_at
                 FROM raw_posts rp
                 JOIN place_posts pp ON pp.post_id = rp.id
                 WHERE pp.place_id = ?
             """
             post_params: list = [place_id]
-            
+
             if cutoff_date:
                 post_query += " AND rp.posted_at >= ?"
                 post_params.append(cutoff_date)
-            
+
             posts = conn.execute(post_query, post_params).fetchall()
-            
             if not posts:
                 continue
-            
-            # Compute stats
+
             distinct_posts = len(posts)
-            distinct_authors = len(set(p["author"] for p in posts if p["author"]))
+            distinct_authors = len({p["author"] for p in posts if p["author"]})
             total_collect_count = sum(p["saves"] or 0 for p in posts)
-            
-            # Apply gates
-            if distinct_posts < min_distinct_posts or distinct_authors < min_distinct_authors:
-                continue
-            
+
             stats = PlaceRepeatStats(
                 distinct_posts=distinct_posts,
                 distinct_authors=distinct_authors,
@@ -212,10 +198,6 @@ def rank_repeating_saves(
                 virality_score=place["virality_score"],
                 sample_urls=tuple(p["url"] for p in posts[:3] if p["url"]),
             )
-            
-            repeat_save_score = compute_repeat_save_score(stats)
-            
-            # Create durable place (no resolution yet, so all fields are from places table)
             durable = DurablePlace(
                 place_id=place_id,
                 name=place["name"],
@@ -223,34 +205,44 @@ def rank_repeating_saves(
                 category=place["category"],
                 place_type=place["type"],
             )
-            
-            ranked.append(
-                RankedPlace(
-                    rank=0,  # Will be set after sorting
-                    place=durable,
-                    stats=stats,
-                    repeat_save_score=repeat_save_score,
-                    method=RANK_METHOD.format(city=city),
-                )
+            item = RankedPlace(
+                rank=0,
+                place=durable,
+                stats=stats,
+                repeat_save_score=compute_repeat_save_score(stats),
+                method=RANK_METHOD.format(city=city),
             )
-        
-        # Sort by repeat_save_score descending and assign ranks
+
+            if (
+                distinct_posts >= min_distinct_posts
+                and distinct_authors >= min_distinct_authors
+            ):
+                ranked.append(item)
+            elif include_near_misses and distinct_posts >= 1:
+                near_misses.append(item)
+
         ranked.sort(key=lambda x: x.repeat_save_score, reverse=True)
         for i, item in enumerate(ranked, 1):
-            # Replace with corrected rank
-            ranked[i-1] = RankedPlace(
+            ranked[i - 1] = RankedPlace(
                 rank=i,
                 place=item.place,
                 stats=item.stats,
                 repeat_save_score=item.repeat_save_score,
                 method=item.method,
             )
-        
-        # Build method string with window info
+
         method = RANK_METHOD.format(city=city)
         if window_days:
-            method = f"places that keep appearing in saved-heavy {city} TikToks from the last {window_days} days"
-        
+            method = (
+                f"places that keep appearing in saved-heavy {city} TikToks "
+                f"from the last {window_days} days"
+            )
+
+        # Near-misses are appended after ranked rows with rank 0 for CSV inspection
+        if include_near_misses:
+            near_misses.sort(key=lambda x: x.stats.total_collect_count, reverse=True)
+            ranked.extend(near_misses)
+
         return CityGuideExport(
             schema_version=SCHEMA_VERSION,
             city=city,

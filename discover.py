@@ -141,6 +141,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip Apify scraping, run extraction on existing data",
     )
     parser.add_argument(
+        "--from-json",
+        metavar="PATH",
+        help="Import an existing Apify dataset JSON (no Apify spend) then continue the pipeline",
+    )
+    parser.add_argument(
+        "--skip-ocr",
+        action="store_true",
+        help="Skip visual OCR (on-screen names will be missing — use only for captions-only replay)",
+    )
+    parser.add_argument(
+        "--heuristic-extract",
+        action="store_true",
+        help="Extract places via listicle/OCR/subtitle heuristics only (no OpenRouter LLM)",
+    )
+    parser.add_argument(
+        "--export-guide",
+        action="store_true",
+        help="Export repeating-saves city guide JSON/CSV after ranking",
+    )
+    parser.add_argument(
+        "--min-authors",
+        type=int,
+        default=1,
+        help="Repeating-saves gate: min distinct authors (default: 1)",
+    )
+    parser.add_argument(
         "--retry-failed",
         action="store_true",
         help="Reset failed hashtags to pending so they get re-scraped",
@@ -215,23 +241,36 @@ def main() -> None:
                     repend_count,
                 )
 
-        # Step 1: Hashtag Generation
-        from pipeline.hashtags import generate_hashtags
-
+        # Step 1: Hashtag Generation (skipped on pure JSON replay)
         category = args.category
-        if category:
-            log.info(
-                "Step 1/5: Generating %s hashtags for %s...",
-                CATEGORIES[category]["label"],
-                city_name,
-            )
-        else:
-            log.info("Step 1/5: Generating hashtags for %s...", city_name)
-        tags = generate_hashtags(conn, city_id, city_name, category=category)
-        log.info("Generated %d unique hashtags", len(tags))
+        if not args.from_json:
+            from pipeline.hashtags import generate_hashtags
 
-        # Step 2: Apify Scraping
-        if not args.skip_scrape:
+            if category:
+                log.info(
+                    "Step 1/5: Generating %s hashtags for %s...",
+                    CATEGORIES[category]["label"],
+                    city_name,
+                )
+            else:
+                log.info("Step 1/5: Generating hashtags for %s...", city_name)
+            tags = generate_hashtags(conn, city_id, city_name, category=category)
+            log.info("Generated %d unique hashtags", len(tags))
+        else:
+            log.info("Step 1/5: Skipping hashtag generation (--from-json)")
+
+        # Step 2: Apify Scraping OR JSON replay
+        if args.from_json:
+            from pipeline.replay import import_apify_json
+
+            log.info("Step 2/5: Replaying Apify JSON from %s (no Apify spend)...", args.from_json)
+            import_apify_json(
+                conn,
+                city_id,
+                args.from_json,
+                window_days=args.window_days,
+            )
+        elif not args.skip_scrape:
             from pipeline.scraper import scrape_posts
 
             log.info("Step 2/5: Scraping social media posts...")
@@ -246,17 +285,34 @@ def main() -> None:
         else:
             log.info("Step 2/5: Skipping scraping (--skip-scrape)")
 
-        # Step 2.5: Visual OCR — extract on-screen text from cover images
-        from pipeline.ocr import extract_cover_text
+        # Step 2.4: Subtitle enrichment (free — uses links already on posts)
+        from pipeline.subtitles import enrich_captions_with_subtitles
 
-        log.info("Step 2.5: Running visual OCR on cover images...")
-        extract_cover_text(conn, city_id, city_name)
+        log.info("Step 2.4: Enriching captions from subtitle links...")
+        enrich_captions_with_subtitles(conn, city_id, city_name)
 
-        # Step 3: LLM Place Extraction
+        # Step 2.5: Visual OCR — extract on-screen text from cover/slideshow images
+        if args.skip_ocr:
+            log.warning(
+                "Step 2.5: Skipping OCR (--skip-ocr). On-screen venue names will be missing."
+            )
+        else:
+            from pipeline.ocr import OCRError, extract_cover_text
+
+            log.info("Step 2.5: Running visual OCR on cover/slideshow images...")
+            try:
+                extract_cover_text(conn, city_id, city_name)
+            except OCRError as e:
+                print(f"\n  OCR failed closed: {e}\n", file=sys.stderr)
+                sys.exit(2)
+
+        # Step 3: Place Extraction
         from pipeline.extractor import extract_places
 
         log.info("Step 3/5: Extracting places from captions...")
-        extract_places(conn, city_id, city_name)
+        extract_places(
+            conn, city_id, city_name, heuristic_only=args.heuristic_extract
+        )
 
         # Step 4: Deduplication + Scoring
         from pipeline.scorer import deduplicate_and_score
@@ -270,17 +326,42 @@ def main() -> None:
         log.info("Step 5a/5: Filtering generic names and off-city locations...")
         filter_generic_and_off_city(conn, city_id, city_name)
 
-        # Step 5b: Tourist Trap Filter
-        from pipeline.filter import filter_tourist_traps
+        # Step 5b: Tourist Trap Filter (skip when heuristic-only — needs LLM)
+        if not args.heuristic_extract:
+            from pipeline.filter import filter_tourist_traps
 
-        log.info("Step 5b/5: Filtering tourist traps...")
-        filter_tourist_traps(conn, city_id, city_name)
+            log.info("Step 5b/5: Filtering tourist traps...")
+            filter_tourist_traps(conn, city_id, city_name)
+        else:
+            log.info("Step 5b/5: Skipping tourist-trap LLM filter (--heuristic-extract)")
 
         # Output
         print_summary(conn, city_id, city_name, category=category)
 
         if args.export_csv:
             export_csv(conn, city_id, city_name)
+
+        if args.export_guide:
+            from pathlib import Path
+
+            from pipeline.city_saved_places import export_city_guide, rank_repeating_saves
+
+            guide = rank_repeating_saves(
+                city_name,
+                category=category,
+                window_days=args.window_days,
+                min_distinct_authors=args.min_authors,
+                include_near_misses=True,
+                conn=conn,
+            )
+            safe = city_name.lower().replace(" ", "_")
+            json_path = Path(f"{safe}_last_{args.window_days}_days.json")
+            csv_path = Path(f"{safe}_last_{args.window_days}_days.csv")
+            export_city_guide(guide, json_path, fmt="json")
+            export_city_guide(guide, csv_path, fmt="csv")
+            print(
+                f"\n  Guide export: {len(guide.places)} rows → {json_path} / {csv_path}"
+            )
 
     except CreditsExhaustedError:
         print(

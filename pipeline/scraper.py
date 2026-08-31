@@ -41,6 +41,54 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _subtitle_urls(video_meta: dict) -> str:
+    """Prefer English subtitle download links; store newline-separated."""
+    links = video_meta.get("subtitleLinks") or []
+    if not isinstance(links, list):
+        return ""
+    ordered = sorted(
+        links,
+        key=lambda s: 0 if isinstance(s, dict) and s.get("language") == "en" else 1,
+    )
+    urls = []
+    for entry in ordered:
+        if not isinstance(entry, dict):
+            continue
+        url = (entry.get("downloadLink") or "").strip()
+        if url:
+            urls.append(url)
+    return "\n".join(urls)
+
+
+def _slideshow_urls(item: dict) -> str:
+    """Collect slideshow / carousel image URLs when the actor provides them."""
+    urls: list[str] = []
+    media = item.get("mediaUrls") or []
+    if isinstance(media, list):
+        for u in media:
+            if isinstance(u, str) and u.strip():
+                urls.append(u.strip())
+    # Some actor builds nest slideshow images here
+    for key in ("slideshowImageLinks", "imageUrls"):
+        extra = item.get(key) or []
+        if isinstance(extra, list):
+            for entry in extra:
+                if isinstance(entry, str) and entry.strip():
+                    urls.append(entry.strip())
+                elif isinstance(entry, dict):
+                    u = entry.get("url") or entry.get("downloadLink") or ""
+                    if u:
+                        urls.append(u.strip())
+    # Dedupe preserve order
+    seen: set[str] = set()
+    out: list[str] = []
+    for u in urls:
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+    return "\n".join(out)
+
+
 def _map_tiktok(item: dict) -> dict:
     """Map a raw TikTok Apify result to our canonical post dict."""
     stats = item.get("stats", {})
@@ -82,6 +130,8 @@ def _map_tiktok(item: dict) -> dict:
         "author": author_name,
         "created_at": item.get("createTime"),
         "cover_url": cover_url,
+        "subtitle_urls": _subtitle_urls(video_meta),
+        "slideshow_urls": _slideshow_urls(item),
     }
 
 
@@ -172,7 +222,11 @@ def _generate_search_queries(city_name: str, category: str | None = None) -> lis
             queries.extend([
                 "東京 グルメ おすすめ",  # Tokyo gourmet recommendations
             ])
-    
+        elif city == "seoul":
+            queries.extend([
+                "서울 맛집 추천",  # Seoul restaurant recommendations
+            ])
+
     return queries
 
 
@@ -199,19 +253,48 @@ def _filter_by_window(posts: list[dict], window_days: int | None) -> list[dict]:
     """Client-side filter posts to only include those from the last window_days."""
     if window_days is None:
         return posts
-    
+
     cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
     filtered = []
     for post in posts:
         created_dt = _parse_timestamp(post.get("created_at"))
         if created_dt and created_dt >= cutoff:
             filtered.append(post)
-    
+
     dropped = len(posts) - len(filtered)
     if dropped:
         log.info("Filtered out %d posts outside %d-day window", dropped, window_days)
-    
+
     return filtered
+
+
+def _filter_city_relevant(posts: list[dict], city_name: str) -> list[dict]:
+    """Drop obvious off-topic search junk (Roblox, recipes, etc.) lacking city cues."""
+    city = city_name.lower()
+    tokens = {city, city.replace(" ", "")}
+    if city == "seoul":
+        tokens.update({"한국", "서울", "korea", "korean"})
+    elif city == "tokyo":
+        tokens.update({"東京", "japan", "japanese", "tokyo"})
+
+    kept = []
+    for post in posts:
+        caption = (post.get("caption") or "").lower()
+        if any(t in caption for t in tokens):
+            kept.append(post)
+            continue
+        # Keep posts with a non-empty location tag (already appended to caption as 📍)
+        if "📍 location tag:" in caption:
+            kept.append(post)
+    dropped = len(posts) - len(kept)
+    if dropped:
+        log.info(
+            "Filtered out %d/%d posts lacking %s relevance cues",
+            dropped,
+            len(posts),
+            city_name,
+        )
+    return kept
 
 
 def _scrape_batch(
@@ -221,6 +304,7 @@ def _scrape_batch(
     max_posts: int,
     window_days: int | None = None,
     search_queries: list[str] | None = None,
+    city_name: str | None = None,
 ) -> list[dict]:
     """Run ONE Apify actor call for all *tags* and return mapped post dicts."""
     if platform == "tiktok":
@@ -228,20 +312,27 @@ def _scrape_batch(
         # Lift the 30-post cap when user specifies --max-posts explicitly
         per_hashtag = max_posts
         run_input = {"hashtags": tags, "resultsPerPage": per_hashtag}
-        
+
         # Add search queries if provided (search mode)
         if search_queries:
             run_input["searchQueries"] = search_queries
             run_input["searchSection"] = "/video"
-            # Use actor-side date filtering when window_days is set to reduce credits
-            if window_days is not None and window_days <= 30:
-                run_input["videoSearchDateFilter"] = "THIS_MONTH"
-        
+            # PAST_MONTH is the schema-valid last-30 filter. THIS_MONTH was rejected
+            # by clockworks/free-tiktok-scraper (verified on Seoul run 5vvdeReFQ6O9wzbct).
+            if window_days is not None and window_days <= 31:
+                run_input["videoSearchDateFilter"] = "PAST_MONTH"
+
+        # Ask the actor for assets we need for on-screen extraction. Skipping these
+        # (as the Seoul paid run did) means slideshow names never enter the corpus.
+        run_input["shouldDownloadSlideshowImages"] = True
+        run_input["shouldDownloadCovers"] = False  # remote coverUrl is enough
+        run_input["downloadSubtitlesOptions"] = "DOWNLOAD_IF_AVAILABLE"
+
         # For hashtag scraping with window_days, use oldestPostDateUnified if available
         if window_days is not None and tags:
             cutoff_dt = datetime.now(timezone.utc) - timedelta(days=window_days)
             run_input["oldestPostDateUnified"] = cutoff_dt.isoformat()
-        
+
         run = actor.call(
             run_input=run_input,
             build="latest",
@@ -281,6 +372,9 @@ def _scrape_batch(
             platform,
             len(tags),
         )
+
+    if city_name and search_queries:
+        mapped = _filter_city_relevant(mapped, city_name)
 
     return mapped
 
@@ -344,7 +438,16 @@ def scrape_posts(
             tags = [r["tag"] for r in rows]
             # Only pass search queries to TikTok
             queries = search_queries if platform == "tiktok" else None
-            future = pool.submit(_scrape_batch, client, platform, tags, max_posts, window_days, queries)
+            future = pool.submit(
+                _scrape_batch,
+                client,
+                platform,
+                tags,
+                max_posts,
+                window_days,
+                queries,
+                city_name,
+            )
             futures[future] = (platform, rows)
 
         for future in as_completed(futures):
@@ -357,10 +460,15 @@ def scrape_posts(
                 for post_data in posts:
                     if not post_data.get("post_id"):
                         continue
-                    # Insert post linked to first hashtag
+                    existing = conn.execute(
+                        "SELECT id FROM raw_posts WHERE platform = ? AND post_id = ?",
+                        (platform, post_data["post_id"]),
+                    ).fetchone()
+                    # Insert post linked to first hashtag (no re-download of known posts)
                     raw_id = db.insert_post(conn, city_id, platform, post_data, hashtag_ids[0])
                     if raw_id is not None:
-                        inserted += 1
+                        if existing is None:
+                            inserted += 1
                         # Link to remaining hashtags
                         for hid in hashtag_ids[1:]:
                             conn.execute(

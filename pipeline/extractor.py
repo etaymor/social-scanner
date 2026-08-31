@@ -6,16 +6,20 @@ import sqlite3
 import config
 
 from . import db
+from .listicle import extract_named_places_heuristic
 from .llm import LLMError, call_llm_json, sanitize_text
 
 log = logging.getLogger(__name__)
+
+# Keep listicle tails (Top 10/30 restaurants). Old 500-char cap dropped venues.
+_CAPTION_MAX_CHARS = 2500
 
 SYSTEM_PROMPT = """\
 You are extracting specific place names from social media captions about {city_name}.
 
 Rules:
 - Extract ALL named places, businesses, venues, and locations mentioned in each caption
-- Include places from: caption text, 📍 location tags, 🔤 on-screen text (OCR from video/image), addresses, and any other location references
+- Include places from: caption text, 📍 location tags, 🔤 on-screen text (OCR), 🎙 Subtitles, addresses, and any other location references
 - Extract EVERY place mentioned, even if multiple places appear in a single caption (e.g. "Top 5 restaurants" lists)
 - Include the neighborhood/area if mentioned alongside the place
 - Classify each place by type
@@ -23,6 +27,7 @@ Rules:
 - DO extract specific neighborhoods, streets, markets, and districts by name
 - DO extract places even if only a business name is given (e.g. "@CafeBlue" → "Cafe Blue")
 - DO extract places from numbered lists (e.g. "1. Sushi Dai 2. Ramen Street" → extract both)
+- DO extract places written only in on-screen/subtitle blocks even when the main caption is generic
 - DO NOT extract the city name itself ("{city_name}") or the country name as a place
 - DO NOT extract generic city + cuisine combinations (e.g. "Tokyo Sushi", "Tokyo Ramen") unless they are clearly a specific business name with additional context
 - DO NOT extract standalone neighborhood or area names from location tags unless paired with a specific business name (e.g. "Shibuya" alone is not a venue, but "Shibuya Crossing" or "Cafe in Shibuya" would be)
@@ -54,9 +59,42 @@ def _build_numbered_captions(posts: list[sqlite3.Row]) -> tuple[str, dict[int, s
         if not caption or not caption.strip():
             continue
         idx += 1
-        lines.append(f"{idx}. {sanitize_text(caption.strip(), max_length=500)}")
+        lines.append(f"{idx}. {sanitize_text(caption.strip(), max_length=_CAPTION_MAX_CHARS)}")
         index_to_post[idx] = post
     return "\n".join(lines), index_to_post
+
+
+def _upsert_extracted(
+    conn: sqlite3.Connection,
+    city_id: int,
+    city_name: str,
+    post: sqlite3.Row,
+    places: list,
+) -> int:
+    """Validate and upsert a list of place dicts for one post. Returns count."""
+    places_extracted = 0
+    for place in places:
+        if not isinstance(place, dict):
+            continue
+        name = place.get("name", "").strip()
+        if not name:
+            continue
+        if name.lower() == city_name.lower():
+            continue
+        place_type = _validate_place_type(place.get("type", "other"))
+        category = _validate_category(place.get("category"), place_type)
+        db.upsert_place(
+            conn,
+            city_id,
+            name,
+            place_type,
+            post["id"],
+            (post["caption"] or "")[:500],
+            category=category,
+        )
+        places_extracted += 1
+        log.debug("  -> %s (%s, %s)", name, place_type, category)
+    return places_extracted
 
 
 def _validate_place_type(place_type: str) -> str:
@@ -82,24 +120,33 @@ def _process_batch(
     city_id: int,
     city_name: str,
     posts: list[sqlite3.Row],
+    *,
+    heuristic_only: bool = False,
 ) -> int:
-    """Send one batch to the LLM and upsert extracted places.
+    """Send one batch to the LLM (unless heuristic_only) and upsert places.
 
-    Returns the number of places extracted.
+    Always merges deterministic listicle/OCR/subtitle parses so multi-place
+    slideshow captions are not lost when the model truncates.
     """
     numbered_captions, index_to_post = _build_numbered_captions(posts)
 
     if not index_to_post:
-        # Every caption in the batch was empty — nothing to send.
         return 0
+
+    places_extracted = 0
+
+    # Deterministic pass first (listicles + on-screen blocks)
+    for post in index_to_post.values():
+        heuristic = extract_named_places_heuristic(post["caption"] or "")
+        places_extracted += _upsert_extracted(conn, city_id, city_name, post, heuristic)
+
+    if heuristic_only:
+        return places_extracted
 
     system = SYSTEM_PROMPT.format(city_name=city_name)
     user_prompt = USER_PROMPT_TEMPLATE.format(numbered_captions=numbered_captions)
-
     response = call_llm_json(user_prompt, system=system, temperature=0.2)
-
     results = response.get("results", []) if isinstance(response, dict) else []
-    places_extracted = 0
 
     for item in results:
         if not isinstance(item, dict):
@@ -110,30 +157,8 @@ def _process_batch(
             continue
         if caption_index is None or caption_index not in index_to_post:
             continue
-
         post = index_to_post[caption_index]
-        for place in places:
-            if not isinstance(place, dict):
-                continue
-            name = place.get("name", "").strip()
-            if not name:
-                continue
-            # Skip the city name itself — it's not a "place"
-            if name.lower() == city_name.lower():
-                continue
-            place_type = _validate_place_type(place.get("type", "other"))
-            category = _validate_category(place.get("category"), place_type)
-            db.upsert_place(
-                conn,
-                city_id,
-                name,
-                place_type,
-                post["id"],
-                (post["caption"] or "")[:500],
-                category=category,
-            )
-            places_extracted += 1
-            log.debug("  -> %s (%s, %s)", name, place_type, category)
+        places_extracted += _upsert_extracted(conn, city_id, city_name, post, places)
 
     return places_extracted
 
@@ -142,6 +167,8 @@ def extract_places(
     conn: sqlite3.Connection,
     city_id: int,
     city_name: str,
+    *,
+    heuristic_only: bool = False,
 ) -> int:
     """Extract place names from all unprocessed posts for a city.
 
@@ -163,7 +190,9 @@ def extract_places(
         post_ids = [post["id"] for post in posts]
 
         try:
-            extracted = _process_batch(conn, city_id, city_name, posts)
+            extracted = _process_batch(
+                conn, city_id, city_name, posts, heuristic_only=heuristic_only
+            )
             total_places += extracted
             db.mark_posts_processed(conn, post_ids)
             conn.commit()

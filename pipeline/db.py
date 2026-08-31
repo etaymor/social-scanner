@@ -123,6 +123,18 @@ def init_db(conn: sqlite3.Connection) -> None:
         if "duplicate column name" not in str(e):
             raise
 
+    # Migration — OCR / subtitle / slideshow enrichment columns
+    for col, typedef in (
+        ("ocr_status", "TEXT DEFAULT 'pending'"),
+        ("subtitle_urls", "TEXT DEFAULT NULL"),
+        ("slideshow_urls", "TEXT DEFAULT NULL"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE raw_posts ADD COLUMN {col} {typedef}")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" not in str(e):
+                raise
+
     # Migration — add hidden column for soft-delete / blocking places
     try:
         conn.execute("ALTER TABLE places ADD COLUMN hidden BOOLEAN DEFAULT FALSE")
@@ -382,8 +394,9 @@ def insert_post(
         cur = conn.execute(
             """INSERT OR IGNORE INTO raw_posts
                (city_id, platform, post_id, caption, likes, comments, shares,
-                saves, views, url, author, created_at, cover_url, posted_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                saves, views, url, author, created_at, cover_url, posted_at,
+                subtitle_urls, slideshow_urls, ocr_status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')""",
             (
                 city_id,
                 platform,
@@ -399,6 +412,8 @@ def insert_post(
                 post_data.get("created_at"),
                 post_data.get("cover_url"),
                 posted_at,
+                post_data.get("subtitle_urls"),
+                post_data.get("slideshow_urls"),
             ),
         )
         if cur.rowcount == 0:
@@ -453,7 +468,10 @@ def upsert_place(
     sample_caption: str | None = None,
     category: str | None = None,
 ) -> int:
-    """Insert or update a place, link it to the post. Returns place id."""
+    """Insert or update a place, link it to the post. Returns place id.
+
+    ``mention_count`` counts distinct linked posts, not extraction events.
+    """
     name = re.sub(r"<[^>]+>", "", name)[:200].strip()
     if not name:
         return -1
@@ -471,21 +489,31 @@ def upsert_place(
                 (place_id, post_id),
             )
             return place_id
-        conn.execute(
-            "UPDATE places SET mention_count = mention_count + 1, category = COALESCE(?, category) WHERE id = ?",
-            (category, place_id),
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO place_posts (place_id, post_id) VALUES (?, ?)",
+            (place_id, post_id),
         )
+        if cur.rowcount:
+            conn.execute(
+                "UPDATE places SET mention_count = mention_count + 1, "
+                "category = COALESCE(?, category) WHERE id = ?",
+                (category, place_id),
+            )
+        elif category:
+            conn.execute(
+                "UPDATE places SET category = COALESCE(?, category) WHERE id = ?",
+                (category, place_id),
+            )
     else:
         cur = conn.execute(
             "INSERT INTO places (city_id, name, type, sample_caption, category) VALUES (?, ?, ?, ?, ?)",
             (city_id, name, place_type, sample_caption, category),
         )
         place_id = cur.lastrowid
-
-    conn.execute(
-        "INSERT OR IGNORE INTO place_posts (place_id, post_id) VALUES (?, ?)",
-        (place_id, post_id),
-    )
+        conn.execute(
+            "INSERT OR IGNORE INTO place_posts (place_id, post_id) VALUES (?, ?)",
+            (place_id, post_id),
+        )
     return place_id
 
 
@@ -594,14 +622,14 @@ def merge_places(conn: sqlite3.Connection, keep_id: int, merge_ids: list[int]) -
             [keep_id, *merge_ids],
         )
 
-        # Sum up mention counts
+        # Recount from distinct linked posts (avoid double-counting aliases)
         row = conn.execute(
-            f"SELECT COALESCE(SUM(mention_count), 0) as total FROM places WHERE id IN ({placeholders})",
-            merge_ids,
+            "SELECT COUNT(*) AS cnt FROM place_posts WHERE place_id = ?",
+            (keep_id,),
         ).fetchone()
         conn.execute(
-            "UPDATE places SET mention_count = mention_count + ? WHERE id = ?",
-            (row["total"], keep_id),
+            "UPDATE places SET mention_count = ? WHERE id = ?",
+            (row["cnt"], keep_id),
         )
 
         # Delete merged places (cascade deletes their place_posts)
@@ -609,6 +637,19 @@ def merge_places(conn: sqlite3.Connection, keep_id: int, merge_ids: list[int]) -
             f"DELETE FROM places WHERE id IN ({placeholders})",
             merge_ids,
         )
+
+
+def sync_mention_counts(conn: sqlite3.Connection, city_id: int) -> None:
+    """Set places.mention_count = COUNT(DISTINCT place_posts) for a city."""
+    conn.execute(
+        """UPDATE places
+           SET mention_count = (
+               SELECT COUNT(*) FROM place_posts pp WHERE pp.place_id = places.id
+           )
+           WHERE city_id = ?""",
+        (city_id,),
+    )
+    conn.commit()
 
 
 # --- Stats helpers ---
