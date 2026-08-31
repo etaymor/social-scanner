@@ -566,6 +566,44 @@ def test_ocr_partial_frame_404_city_run_continues(monkeypatch, conn, city_id):
     assert "ok_2" in row["caption"]
 
 
+def test_ocr_watch_page_url_only_is_not_enqueued(monkeypatch, conn, city_id):
+    """Post with only tiktok.com watch url must not be selected or marked failed."""
+    from pipeline import ocr
+
+    conn.execute(
+        "INSERT INTO raw_posts "
+        "(city_id, platform, post_id, url, cover_url, slideshow_urls, video_url, "
+        "caption, ocr_status) "
+        "VALUES (?, 'tiktok', 'watch1', "
+        "'https://www.tiktok.com/@u/video/1234567890', NULL, NULL, NULL, "
+        "'watch page only', 'pending')",
+        (city_id,),
+    )
+    conn.commit()
+
+    monkeypatch.setattr(ocr.config, "OCR_USE_TESSERACT", False)
+    monkeypatch.setattr(ocr.config, "OCR_MODEL", "live/vision")
+    monkeypatch.setattr(ocr.config, "OCR_FALLBACK_MODELS", "")
+    monkeypatch.setattr(ocr.config, "OPENROUTER_API_KEY", "test-key")
+
+    def boom(*args, **kwargs):
+        raise AssertionError("OCR must not run for watch-url-only posts")
+
+    monkeypatch.setattr(ocr, "_download_image", boom)
+    monkeypatch.setattr(ocr, "_download_video", boom)
+    monkeypatch.setattr(ocr, "_ocr_openrouter", boom)
+    monkeypatch.setattr(ocr, "_process_one", boom)
+
+    enriched = ocr.extract_cover_text(conn, city_id, "Seoul")
+    assert enriched == 0
+    row = conn.execute(
+        "SELECT ocr_status, caption FROM raw_posts WHERE post_id = 'watch1'"
+    ).fetchone()
+    # Skipped / unselected — still pending, never failed.
+    assert row["ocr_status"] == "pending"
+    assert row["caption"] == "watch page only"
+
+
 def test_media_timeline_stills_are_cover_plus_slideshow():
     from pipeline.ocr import media_timeline_for_post
 

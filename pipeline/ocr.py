@@ -481,7 +481,7 @@ def extract_cover_text(
 
     while True:
         posts = conn.execute(
-            """SELECT id, cover_url, slideshow_urls, video_url, url, caption
+            """SELECT id, cover_url, slideshow_urls, video_url, caption
                FROM raw_posts
                WHERE city_id = ?
                  AND processed = FALSE
@@ -490,7 +490,6 @@ def extract_cover_text(
                    (slideshow_urls IS NOT NULL AND slideshow_urls != '')
                    OR (video_url IS NOT NULL AND video_url != '')
                    OR (cover_url IS NOT NULL AND cover_url != '')
-                   OR (url IS NOT NULL AND url != '')
                  )
                LIMIT ?""",
             (city_id, batch_size),
