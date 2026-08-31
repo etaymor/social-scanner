@@ -566,18 +566,205 @@ def test_ocr_partial_frame_404_city_run_continues(monkeypatch, conn, city_id):
     assert "ok_2" in row["caption"]
 
 
-def test_ocr_watch_page_url_only_is_not_enqueued(monkeypatch, conn, city_id):
-    """Post with only tiktok.com watch url must not be selected or marked failed."""
+def test_ocr_webvideourl_only_yields_multiple_video_samples(
+    monkeypatch, conn, city_id, tmp_path
+):
+    """Post with ONLY webVideoUrl (no Apify downloadAddr) → multiple ffmpeg samples.
+
+    FAIL if resolution is skipped (cover-only / zero samples).
+    """
+    import subprocess
+
     from pipeline import ocr
+
+    duration = 6.0
+    interval = 1.5
+    video_path = tmp_path / "from_watch_page.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=black:s=320x240:d={duration}",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libx264",
+            str(video_path),
+        ],
+        check=True,
+    )
+    video_bytes = video_path.read_bytes()
+
+    watch = "https://www.tiktok.com/@u/video/999888777"
+    # Seoul-style row: cover present, video_url empty, url = webVideoUrl only.
+    conn.execute(
+        "INSERT INTO raw_posts "
+        "(city_id, platform, post_id, url, cover_url, slideshow_urls, video_url, "
+        "video_duration, caption, ocr_status) "
+        "VALUES (?, 'tiktok', 'watch1', ?, 'http://cdn.example/COVER_ONLY.jpg', "
+        "NULL, NULL, ?, 'watch page only', 'pending')",
+        (city_id, watch, duration),
+    )
+    conn.commit()
+
+    monkeypatch.setattr(ocr.config, "OCR_USE_TESSERACT", False)
+    monkeypatch.setattr(ocr.config, "OCR_MODEL", "live/vision")
+    monkeypatch.setattr(ocr.config, "OCR_FALLBACK_MODELS", "")
+    monkeypatch.setattr(ocr.config, "OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(ocr.config, "OCR_VIDEO_FRAME_INTERVAL", interval)
+
+    downloaded_urls: list[str] = []
+
+    def fake_download_video(url, timeout=60):
+        downloaded_urls.append(url)
+        assert url == watch, f"must yt-dlp the watch page, got {url}"
+        return video_bytes, False
+
+    monkeypatch.setattr(ocr, "_download_video", fake_download_video)
+    monkeypatch.setattr(
+        ocr,
+        "_download_image",
+        lambda url, timeout=10: (_ for _ in ()).throw(
+            AssertionError(f"cover-only path hit for {url} — must sample video")
+        ),
+    )
+
+    ocr_calls: list[int] = []
+
+    def fake_openrouter(image_bytes, model):
+        ocr_calls.append(len(image_bytes))
+        return ocr._EngineResult(
+            text=f"WatchVenue{len(ocr_calls)}",
+            engine=f"openrouter:{model}",
+        )
+
+    monkeypatch.setattr(ocr, "_ocr_openrouter", fake_openrouter)
+
+    # Timeline must resolve watch URL → video, not cover.
+    refs = ocr.media_timeline_for_post(
+        {
+            "url": watch,
+            "cover_url": "http://cdn.example/COVER_ONLY.jpg",
+            "slideshow_urls": "",
+            "video_url": "",
+            "is_slideshow": 0,
+        }
+    )
+    assert len(refs) == 1
+    assert refs[0].kind == "video_url"
+    assert refs[0].url == watch
+
+    enriched = ocr.extract_cover_text(conn, city_id, "Seoul")
+    assert enriched == 1
+    assert downloaded_urls == [watch]
+    expected = duration / interval
+    assert len(ocr_calls) > 0, "FAIL: zero OCR frames from webVideoUrl-only post"
+    assert len(ocr_calls) >= 3, "FAIL: cover-only would be 1 sample"
+    assert abs(len(ocr_calls) - expected) <= 1.5
+
+    row = conn.execute(
+        "SELECT caption, ocr_status FROM raw_posts WHERE post_id = 'watch1'"
+    ).fetchone()
+    assert row["ocr_status"] == "done"
+    assert "WatchVenue1" in row["caption"]
+    assert "COVER_ONLY" not in row["caption"]
+
+
+def test_ocr_video_url_column_holding_webvideourl_also_samples(
+    monkeypatch, conn, city_id, tmp_path
+):
+    """Mapper stores webVideoUrl in video_url — OCR must still sample (mock yt-dlp)."""
+    import subprocess
+
+    from pipeline import ocr
+
+    duration = 4.5
+    interval = 1.5
+    video_path = tmp_path / "mapped_watch.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=blue:s=160x120:d={duration}",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libx264",
+            str(video_path),
+        ],
+        check=True,
+    )
+    video_bytes = video_path.read_bytes()
+    watch = "https://www.tiktok.com/@chef/video/111"
+
+    conn.execute(
+        "INSERT INTO raw_posts "
+        "(city_id, platform, post_id, url, cover_url, video_url, video_duration, "
+        "caption, ocr_status) "
+        "VALUES (?, 'tiktok', 'mapped1', ?, 'http://cdn.example/c.jpg', ?, ?, "
+        "'cap', 'pending')",
+        (city_id, watch, watch, duration),
+    )
+    conn.commit()
+
+    monkeypatch.setattr(ocr.config, "OCR_USE_TESSERACT", False)
+    monkeypatch.setattr(ocr.config, "OCR_MODEL", "live/vision")
+    monkeypatch.setattr(ocr.config, "OCR_FALLBACK_MODELS", "")
+    monkeypatch.setattr(ocr.config, "OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(ocr.config, "OCR_VIDEO_FRAME_INTERVAL", interval)
+    monkeypatch.setattr(
+        ocr, "_download_video", lambda url, timeout=60: (video_bytes, False)
+    )
+    monkeypatch.setattr(
+        ocr,
+        "_download_image",
+        lambda url, timeout=10: (_ for _ in ()).throw(
+            AssertionError("must not OCR cover when video_url is watch page")
+        ),
+    )
+
+    ocr_calls: list[int] = []
+
+    def fake_openrouter(image_bytes, model):
+        ocr_calls.append(1)
+        return ocr._EngineResult(text=f"V{len(ocr_calls)}", engine=f"openrouter:{model}")
+
+    monkeypatch.setattr(ocr, "_ocr_openrouter", fake_openrouter)
+
+    enriched = ocr.extract_cover_text(conn, city_id, "Seoul")
+    assert enriched == 1
+    assert len(ocr_calls) >= 2
+
+
+def test_ocr_slideshow_page_resolves_n_frames_not_cover_only(
+    monkeypatch, conn, city_id
+):
+    """Photo post with empty mediaUrls — resolve N frames from photo URL, not cover."""
+    from pipeline import ocr
+
+    photo = "https://www.tiktok.com/@u/photo/555"
+    n = 4
+    fake_frames = [f"frame-{i}-bytes".encode() for i in range(n)]
 
     conn.execute(
         "INSERT INTO raw_posts "
         "(city_id, platform, post_id, url, cover_url, slideshow_urls, video_url, "
-        "caption, ocr_status) "
-        "VALUES (?, 'tiktok', 'watch1', "
-        "'https://www.tiktok.com/@u/video/1234567890', NULL, NULL, NULL, "
-        "'watch page only', 'pending')",
-        (city_id,),
+        "is_slideshow, caption, ocr_status) "
+        "VALUES (?, 'tiktok', 'photo1', ?, 'http://cdn.example/COVER_ONLY.jpg', "
+        "NULL, NULL, 1, 'slides', 'pending')",
+        (city_id, photo),
     )
     conn.commit()
 
@@ -586,22 +773,58 @@ def test_ocr_watch_page_url_only_is_not_enqueued(monkeypatch, conn, city_id):
     monkeypatch.setattr(ocr.config, "OCR_FALLBACK_MODELS", "")
     monkeypatch.setattr(ocr.config, "OPENROUTER_API_KEY", "test-key")
 
-    def boom(*args, **kwargs):
-        raise AssertionError("OCR must not run for watch-url-only posts")
+    resolve_calls: list[str] = []
 
-    monkeypatch.setattr(ocr, "_download_image", boom)
-    monkeypatch.setattr(ocr, "_download_video", boom)
-    monkeypatch.setattr(ocr, "_ocr_openrouter", boom)
-    monkeypatch.setattr(ocr, "_process_one", boom)
+    def fake_resolve(page_url, timeout=60):
+        resolve_calls.append(page_url)
+        assert page_url == photo
+        return list(fake_frames)
+
+    monkeypatch.setattr(ocr, "resolve_slideshow_frames", fake_resolve)
+    monkeypatch.setattr(
+        ocr,
+        "_download_image",
+        lambda url, timeout=10: (_ for _ in ()).throw(
+            AssertionError(f"cover-only path for slideshow page: {url}")
+        ),
+    )
+
+    ocr_calls: list[bytes] = []
+
+    def fake_openrouter(image_bytes, model):
+        ocr_calls.append(image_bytes)
+        idx = image_bytes.decode().split("-")[1]
+        return ocr._EngineResult(
+            text=f"SlideVenue {idx}",
+            engine=f"openrouter:{model}",
+        )
+
+    monkeypatch.setattr(ocr, "_ocr_openrouter", fake_openrouter)
+
+    refs = ocr.media_timeline_for_post(
+        {
+            "url": photo,
+            "cover_url": "http://cdn.example/COVER_ONLY.jpg",
+            "slideshow_urls": "",
+            "video_url": "",
+            "is_slideshow": 1,
+        }
+    )
+    assert len(refs) == 1
+    assert refs[0].kind == "slideshow_page"
+    assert refs[0].url == photo
 
     enriched = ocr.extract_cover_text(conn, city_id, "Seoul")
-    assert enriched == 0
+    assert enriched == 1
+    assert resolve_calls == [photo]
+    assert len(ocr_calls) == n, f"FAIL: cover-only would be 1, got {len(ocr_calls)}"
+
     row = conn.execute(
-        "SELECT ocr_status, caption FROM raw_posts WHERE post_id = 'watch1'"
+        "SELECT caption, ocr_status FROM raw_posts WHERE post_id = 'photo1'"
     ).fetchone()
-    # Skipped / unselected — still pending, never failed.
-    assert row["ocr_status"] == "pending"
-    assert row["caption"] == "watch page only"
+    assert row["ocr_status"] == "done"
+    for i in range(n):
+        assert f"SlideVenue {i}" in row["caption"]
 
 
 def test_media_timeline_stills_are_cover_plus_slideshow():
@@ -638,3 +861,37 @@ def test_media_timeline_video_excludes_cover():
     assert len(refs) == 1
     assert refs[0].kind == "video_url"
     assert refs[0].url == "http://cdn.example/v.mp4"
+
+
+def test_media_timeline_falls_back_to_watch_url_when_video_url_empty():
+    from pipeline.ocr import media_timeline_for_post
+
+    watch = "https://www.tiktok.com/@u/video/42"
+    refs = media_timeline_for_post(
+        {
+            "cover_url": "http://x/cover.jpg",
+            "slideshow_urls": "",
+            "video_url": "",
+            "url": watch,
+            "is_slideshow": 0,
+        }
+    )
+    assert len(refs) == 1
+    assert refs[0].kind == "video_url"
+    assert refs[0].url == watch
+
+
+def test_media_timeline_webvideourl_in_video_url_column():
+    from pipeline.ocr import _MediaRef, media_timeline_for_post
+
+    watch = "https://www.tiktok.com/@u/video/42"
+    refs = media_timeline_for_post(
+        {
+            "cover_url": "http://x/cover.jpg",
+            "slideshow_urls": "",
+            "video_url": watch,
+            "url": watch,
+            "is_slideshow": False,
+        }
+    )
+    assert refs == [_MediaRef("video_url", watch)]
