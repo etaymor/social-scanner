@@ -1,11 +1,14 @@
 """Visual OCR — extract on-screen text from a post's media timeline.
 
-OCR is a post-scrape caption enricher. Stills unit (same as main once URLs
-land): ``cover_url`` plus every newline-separated ``slideshow_urls`` line.
-Slideshow bugs are ingest (empty ``mediaUrls`` persistence), not the loop.
+OCR is a post-scrape caption enricher. Media must be GET'd — never treat an empty
+Apify ``downloadAddr`` / ``mediaUrls`` as "nothing we can do".
 
-Video (new): sample one frame every 1–2 seconds (default 1.5s) from
-``video_url`` via ffmpeg; do not also OCR cover (avoids t=0 double-count).
+Stills: every ``slideshow_urls`` frame (plus cover when present). When a photo
+post has no frame URLs, resolve all slides from the TikTok photo page (yt-dlp).
+
+Video: sample one frame every 1–2 seconds (default 1.5s) from ``video_url`` —
+which may be a CDN mp4 **or** the watch page (``webVideoUrl``). Download via
+yt-dlp when needed. Do not also OCR cover (avoids t=0 double-count).
 Download/ffmpeg miss → ``ocr_status=failed`` for that post; city continues.
 
 Union text per post. PR #10 engine chain. Never fail-closed. Never
@@ -17,6 +20,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import shutil
 import sqlite3
 import subprocess
 import tempfile
@@ -35,6 +39,9 @@ Read ALL text visible on screen in this social media post image.
 Return ONLY the on-screen text, exactly as it appears, one line per text element.
 Include place names, addresses, numbers/rankings, and any overlaid captions.
 If there is no readable text, return "NO_TEXT"."""
+
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
+_VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 
 
 class _OCRAttempt:
@@ -74,7 +81,7 @@ class _EngineResult:
 class _MediaRef:
     """One media source on the post timeline."""
 
-    kind: str  # "image_url" | "video_url"
+    kind: str  # "image_url" | "video_url" | "slideshow_page"
     url: str
 
 
@@ -93,6 +100,46 @@ def _is_page_url(url: str) -> bool:
     return "tiktok.com/@" in u or "tiktok.com/video/" in u or "/photo/" in u
 
 
+def _is_photo_page(url: str) -> bool:
+    return "/photo/" in (url or "").lower()
+
+
+def _is_video_page(url: str) -> bool:
+    u = (url or "").lower()
+    return "/video/" in u or ("tiktok.com/@" in u and "/photo/" not in u)
+
+
+def _yt_dlp_download(url: str, timeout: int = 60) -> Path | None:
+    """Download media for *url* into a temp directory; return the directory Path.
+
+    Caller owns cleanup of the returned directory. Returns None on soft failure.
+    """
+    try:
+        import yt_dlp
+    except ImportError:
+        log.warning("yt-dlp not installed — cannot resolve page URL to media bytes")
+        return None
+
+    try:
+        td = tempfile.mkdtemp(prefix="ss-media-")
+        outtmpl = str(Path(td) / "media.%(ext)s")
+        opts = {
+            "outtmpl": outtmpl,
+            "quiet": True,
+            "no_warnings": True,
+            "noprogress": True,
+            "socket_timeout": timeout,
+            "format": "mp4/best/bestaudio/best",
+            "writesubtitles": False,
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([url])
+        return Path(td)
+    except Exception:
+        log.debug("yt-dlp download failed for %s", url, exc_info=True)
+        return None
+
+
 def _download_video(url: str, timeout: int = 60) -> tuple[bytes | None, bool]:
     """Download video bytes from a direct CDN URL or a post page URL (yt-dlp).
 
@@ -103,32 +150,114 @@ def _download_video(url: str, timeout: int = 60) -> tuple[bytes | None, bool]:
     if not _is_page_url(url):
         return _download_image(url, timeout=timeout)
 
+    td = _yt_dlp_download(url, timeout=timeout)
+    if td is None:
+        return None, True
+    try:
+        files = sorted(td.glob("media.*"))
+        video_files = [f for f in files if f.suffix.lower() in _VIDEO_EXTS]
+        pick = video_files[0] if video_files else (files[0] if files else None)
+        if pick is None:
+            return None, True
+        return pick.read_bytes(), False
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def resolve_slideshow_frames(page_url: str, timeout: int = 60) -> list[bytes]:
+    """Fetch ALL photo-mode frames from a TikTok photo page (yt-dlp).
+
+    Public for tests. Returns [] on soft failure — never raises.
+    """
+    if not page_url:
+        return []
+    if not _is_page_url(page_url):
+        data, err = _download_image(page_url, timeout=timeout)
+        return [data] if data and not err else []
+
     try:
         import yt_dlp
     except ImportError:
-        log.warning("yt-dlp not installed — cannot resolve page URL to video bytes")
-        return None, True
+        log.warning("yt-dlp not installed — cannot resolve slideshow frames")
+        return []
 
+    frames: list[bytes] = []
     try:
-        with tempfile.TemporaryDirectory() as td:
-            outtmpl = str(Path(td) / "media.%(ext)s")
-            opts = {
-                "outtmpl": outtmpl,
+        with tempfile.TemporaryDirectory(prefix="ss-slides-") as td:
+            tdir = Path(td)
+            opts_info = {
                 "quiet": True,
                 "no_warnings": True,
-                "noprogress": True,
-                "format": "mp4/best",
+                "skip_download": True,
                 "socket_timeout": timeout,
             }
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([url])
-            files = sorted(Path(td).glob("media.*"))
-            if not files:
-                return None, True
-            return files[0].read_bytes(), False
+            image_urls: list[str] = []
+            with yt_dlp.YoutubeDL(opts_info) as ydl:
+                info = ydl.extract_info(page_url, download=False)
+            if isinstance(info, dict):
+                entries = info.get("entries")
+                if isinstance(entries, list) and entries:
+                    for entry in entries:
+                        if not isinstance(entry, dict):
+                            continue
+                        u = entry.get("url") or entry.get("thumbnail")
+                        if isinstance(u, str) and u.startswith("http"):
+                            image_urls.append(u)
+                        else:
+                            thumbs = entry.get("thumbnails") or []
+                            if isinstance(thumbs, list) and thumbs:
+                                best = thumbs[-1] if isinstance(thumbs[-1], dict) else None
+                                if best and isinstance(best.get("url"), str):
+                                    image_urls.append(best["url"])
+                if not image_urls:
+                    for fmt in info.get("formats") or []:
+                        if not isinstance(fmt, dict):
+                            continue
+                        vcodec = (fmt.get("vcodec") or "").lower()
+                        acodec = (fmt.get("acodec") or "").lower()
+                        ext = (fmt.get("ext") or "").lower()
+                        u = fmt.get("url")
+                        if not isinstance(u, str) or not u.startswith("http"):
+                            continue
+                        if ext in ("jpg", "jpeg", "png", "webp") or (
+                            vcodec in ("", "none") and acodec in ("", "none")
+                        ):
+                            if u not in image_urls:
+                                image_urls.append(u)
+                if not image_urls:
+                    for thumb in info.get("thumbnails") or []:
+                        if isinstance(thumb, dict) and isinstance(thumb.get("url"), str):
+                            image_urls.append(thumb["url"])
+
+            if image_urls:
+                seen: set[str] = set()
+                for u in image_urls:
+                    if u in seen:
+                        continue
+                    seen.add(u)
+                    data, err = _download_image(u, timeout=timeout)
+                    if data and not err:
+                        frames.append(data)
+            else:
+                outtmpl = str(tdir / "slide%(playlist_index)s.%(ext)s")
+                opts_dl = {
+                    "outtmpl": outtmpl,
+                    "quiet": True,
+                    "no_warnings": True,
+                    "noprogress": True,
+                    "socket_timeout": timeout,
+                }
+                with yt_dlp.YoutubeDL(opts_dl) as ydl:
+                    ydl.download([page_url])
+                for path in sorted(tdir.iterdir()):
+                    if path.is_file() and path.suffix.lower() in _IMAGE_EXTS:
+                        data = path.read_bytes()
+                        if data:
+                            frames.append(data)
     except Exception:
-        log.debug("Video download failed for %s", url, exc_info=True)
-        return None, True
+        log.debug("Slideshow frame resolve failed for %s", page_url, exc_info=True)
+        return []
+    return frames
 
 
 def _video_frame_interval() -> float:
@@ -150,7 +279,11 @@ def sample_video_frames(
     """
     if not video_bytes:
         return []
-    interval = _video_frame_interval() if interval is None else min(2.0, max(1.0, float(interval)))
+    interval = (
+        _video_frame_interval()
+        if interval is None
+        else min(2.0, max(1.0, float(interval)))
+    )
     frames: list[bytes] = []
     try:
         with tempfile.TemporaryDirectory() as td:
@@ -229,7 +362,6 @@ def _ocr_tesseract(image_bytes: bytes) -> _EngineResult:
         lang = getattr(config, "OCR_TESSERACT_LANG", None) or "eng+kor"
         text = pytesseract.image_to_string(img, lang=lang).strip()
         if not text:
-            # Soft miss — stylized TikTok overlays often defeat Tesseract.
             return _EngineResult(engine=name)
         return _EngineResult(text=text, engine=name)
     except Exception:
@@ -286,7 +418,6 @@ def _ocr_openrouter(image_bytes: bytes, model: str) -> _EngineResult:
         data = resp.json()
         text = data["choices"][0]["message"]["content"].strip()
         if text == "NO_TEXT" or not text:
-            # Authoritative empty — not an HTTP failure.
             return _EngineResult(authoritative_empty=True, engine=name)
         return _EngineResult(text=text, engine=name)
     except (requests.RequestException, KeyError, IndexError, TypeError, ValueError):
@@ -328,7 +459,6 @@ def _ocr_image(image_bytes: bytes) -> tuple[str | None, bool, str | None]:
         if result.authoritative_empty:
             log.info("OCR %s reported NO_TEXT", result.engine)
             return None, False, result.engine
-        # Soft empty (local) — fall through to the next engine.
 
     return None, True, None
 
@@ -344,29 +474,35 @@ def _split_urls(raw: object) -> list[str]:
     return urls
 
 
+def _get_field(post: sqlite3.Row | dict, name: str) -> object:
+    if isinstance(post, dict):
+        return post.get(name)
+    try:
+        return post[name]
+    except (KeyError, IndexError):
+        return None
+
+
 def media_timeline_for_post(post: sqlite3.Row | dict) -> list[_MediaRef]:
     """Build the OCR media timeline for one post.
 
-    Stills (main behavior once URLs land): cover_url + every slideshow_urls
-    line, deduped. Video (new): samples from video_url only — do not also OCR
-    cover (avoids double-counting the t=0 frame). Cover alone only when neither
-    slideshow frames nor a downloadable video_url exist.
+    Priority:
+    1. Explicit slideshow frame URLs (cover + every slide, deduped).
+    2. Photo page URL when ``is_slideshow`` / ``/photo/`` and frames missing —
+       resolve ALL slides at OCR time (not cover-only).
+    3. Video source: ``video_url`` (CDN **or** watch page) — never also OCR cover.
+    4. Watch page ``url`` when ``video_url`` empty (already-ingested Seoul-style rows).
+    5. Cover alone only when no slideshow/video/page source exists.
     """
-
-    def _get(name: str) -> object:
-        if isinstance(post, dict):
-            return post.get(name)
-        try:
-            return post[name]
-        except (KeyError, IndexError):
-            return None
-
-    slideshow = _split_urls(_get("slideshow_urls"))
-    cover = str(_get("cover_url") or "").strip()
-    video = str(_get("video_url") or "").strip()
+    slideshow = _split_urls(_get_field(post, "slideshow_urls"))
+    cover = str(_get_field(post, "cover_url") or "").strip()
+    video = str(_get_field(post, "video_url") or "").strip()
+    page = str(_get_field(post, "url") or "").strip()
+    is_ss_flag = _get_field(post, "is_slideshow")
+    is_slideshow = is_ss_flag in (True, 1, "1", "true", "True")
+    is_slideshow = is_slideshow or bool(slideshow) or _is_photo_page(page)
 
     if slideshow:
-        # Match main's stills unit: cover first, then every slide URL (deduped).
         urls: list[str] = []
         if cover:
             urls.append(cover)
@@ -375,9 +511,14 @@ def media_timeline_for_post(post: sqlite3.Row | dict) -> list[_MediaRef]:
                 urls.append(u)
         return [_MediaRef("image_url", u) for u in urls]
 
-    if video:
-        # Video path only — never attach cover (t=0 sample ≈ cover).
-        return [_MediaRef("video_url", video)]
+    if is_slideshow and page:
+        return [_MediaRef("slideshow_page", page)]
+
+    video_src = video
+    if not video_src and page and _is_video_page(page):
+        video_src = page
+    if video_src:
+        return [_MediaRef("video_url", video_src)]
 
     if cover:
         return [_MediaRef("image_url", cover)]
@@ -391,6 +532,12 @@ def _frames_from_media(ref: _MediaRef) -> tuple[list[bytes], bool]:
         if err or not data:
             return [], True
         return [data], False
+
+    if ref.kind == "slideshow_page":
+        frames = resolve_slideshow_frames(ref.url)
+        if not frames:
+            return [], True
+        return frames, False
 
     video_bytes, err = _download_video(ref.url)
     if err or not video_bytes:
@@ -406,7 +553,7 @@ def _process_one(post_id: int, media: list[_MediaRef]) -> _OCRAttempt:
 
     Download/ffmpeg miss on a video (or total still miss) surfaces as
     download_error → ``ocr_status=failed`` for that post; the city run continues.
-    No cover soft-success when the timeline was video-only.
+    No cover soft-success when the timeline was video-only / slideshow-page.
     """
     texts: list[str] = []
     engines_used: list[str] = []
@@ -414,7 +561,7 @@ def _process_one(post_id: int, media: list[_MediaRef]) -> _OCRAttempt:
     any_download = False
     frame_count = 0
     attempted = False
-    had_video = any(r.kind == "video_url" for r in media)
+    needs_multi_frame = any(r.kind in ("video_url", "slideshow_page") for r in media)
 
     for ref in media:
         if not ref.url:
@@ -423,7 +570,6 @@ def _process_one(post_id: int, media: list[_MediaRef]) -> _OCRAttempt:
         frames, dl_err = _frames_from_media(ref)
         if dl_err:
             any_download = True
-            # One frame/source miss must not abort the post or city run.
             continue
         for image_bytes in frames:
             frame_count += 1
@@ -439,11 +585,9 @@ def _process_one(post_id: int, media: list[_MediaRef]) -> _OCRAttempt:
     if not attempted:
         return _OCRAttempt(post_id, download_error=True)
 
-    # Video download/ffmpeg produced zero frames → failed for this post (not cover).
-    if had_video and frame_count == 0:
+    if needs_multi_frame and frame_count == 0:
         return _OCRAttempt(post_id, download_error=True, frame_count=0)
 
-    # Deduplicate identical frame reads while preserving order
     seen: set[str] = set()
     unique_texts: list[str] = []
     for t in texts:
@@ -481,7 +625,7 @@ def extract_cover_text(
 
     while True:
         posts = conn.execute(
-            """SELECT id, cover_url, slideshow_urls, video_url, caption
+            """SELECT id, cover_url, slideshow_urls, video_url, url, is_slideshow, caption
                FROM raw_posts
                WHERE city_id = ?
                  AND processed = FALSE
@@ -490,6 +634,13 @@ def extract_cover_text(
                    (slideshow_urls IS NOT NULL AND slideshow_urls != '')
                    OR (video_url IS NOT NULL AND video_url != '')
                    OR (cover_url IS NOT NULL AND cover_url != '')
+                   OR (
+                     url IS NOT NULL AND url != ''
+                     AND (
+                       instr(lower(url), '/video/') > 0
+                       OR instr(lower(url), '/photo/') > 0
+                     )
+                   )
                  )
                LIMIT ?""",
             (city_id, batch_size),
@@ -558,7 +709,6 @@ def extract_cover_text(
                         result.frame_count,
                     )
                 else:
-                    # No text or download-only miss — mark done so we don't spin forever
                     status = "empty" if not result.download_error else "failed"
                     if result.download_error:
                         total_http_errors += 1

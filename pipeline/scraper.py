@@ -159,8 +159,33 @@ def _is_slideshow(item: dict) -> bool:
     return bool(_slideshow_urls(item))
 
 
+def _watch_page_url(item: dict) -> str:
+    """TikTok watch/photo page URL from the actor item (webVideoUrl or constructed)."""
+    page = item.get("webVideoUrl")
+    if isinstance(page, str) and page.strip():
+        return page.strip()
+    post_id = item.get("id")
+    author_meta = item.get("authorMeta") or {}
+    author_name = (
+        author_meta.get("name") if isinstance(author_meta, dict) else None
+    ) or item.get("author")
+    if post_id and author_name:
+        kind = "photo" if _is_slideshow(item) else "video"
+        return f"https://www.tiktok.com/@{author_name}/{kind}/{post_id}"
+    return ""
+
+
 def _video_url(item: dict) -> str:
-    """Direct downloadable video URL when present — never the HTML page link."""
+    """Video source for OCR: prefer CDN downloadAddr, else the TikTok watch page.
+
+    clockworks/free-tiktok-scraper often returns coverUrl+duration+webVideoUrl with
+    an empty downloadAddr. The watch page is a valid download source (yt-dlp).
+    Slideshow / photo posts do not get a video_url — frames come from image fields
+    or photo-page resolution.
+    """
+    if _is_slideshow(item):
+        return ""
+
     candidates: list[str] = []
     for key in ("downloadAddr", "videoDownloadUrl", "videoUrl"):
         u = item.get(key)
@@ -181,6 +206,11 @@ def _video_url(item: dict) -> str:
     for u in candidates:
         if _is_direct_media_url(u):
             return u
+
+    # No CDN bytes from Apify — use the watch page so OCR can GET the media.
+    page = _watch_page_url(item)
+    if page and ("/video/" in page.lower() or "tiktok.com" in page.lower()):
+        return page
     return ""
 
 
@@ -222,8 +252,11 @@ def _map_tiktok(item: dict) -> dict:
         "shares": item.get("shareCount") or stats.get("shareCount", 0),
         "saves": saves,
         "views": item.get("playCount") or stats.get("playCount", 0),
-        "url": (
-            item.get("webVideoUrl") or f"https://www.tiktok.com/@{author_name}/video/{post_id}"
+        "url": _watch_page_url(item)
+        or (
+            f"https://www.tiktok.com/@{author_name}/video/{post_id}"
+            if post_id and author_name
+            else ""
         ),
         "author": author_name,
         "created_at": item.get("createTime"),
@@ -410,8 +443,10 @@ def _scrape_batch(
     """Run ONE Apify actor call for all *tags* and return mapped post dicts."""
     if platform == "tiktok":
         actor = client.actor(config.TIKTOK_ACTOR)
-        # Lift the 30-post cap when user specifies --max-posts explicitly
+        # Search path: hard-cap ~20 (cheap food discover). Hashtag path keeps max_posts.
         per_hashtag = max_posts
+        if search_queries:
+            per_hashtag = min(max_posts, getattr(config, "SEARCH_MAX_POSTS", 20))
         run_input = {"hashtags": tags, "resultsPerPage": per_hashtag}
 
         # Add search queries if provided (search mode)
@@ -476,6 +511,17 @@ def _scrape_batch(
 
     if city_name and search_queries:
         mapped = _filter_city_relevant(mapped, city_name)
+
+    # Hard cap after filters for the cheap search path.
+    if search_queries:
+        cap = getattr(config, "SEARCH_MAX_POSTS", 20)
+        if len(mapped) > cap:
+            log.info(
+                "Search hard-cap: truncating %d → %d posts",
+                len(mapped),
+                cap,
+            )
+            mapped = mapped[:cap]
 
     return mapped
 

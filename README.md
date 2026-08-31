@@ -249,8 +249,9 @@ The pipeline runs 5 sequential steps, each building on the previous:
 │  (Note: Instagram scraping exists but is not used)      │
 ├─────────────────────────────────────────────────────────┤
 │  Step 2.5: Visual OCR                                   │
-│  On-screen text from ALL slideshow frames + video       │
-│  samples every 1–2s (union per post; never cover-only)  │
+│  GET media (CDN or yt-dlp from webVideoUrl / photo URL) │
+│  OCR ALL slideshow frames + video samples every 1–2s    │
+│  (never cover-only when watch/photo URL exists)         │
 ├─────────────────────────────────────────────────────────┤
 │  Step 3: Place Extraction                               │
 │  LLM extracts named places from captions (batches of 20)│

@@ -189,19 +189,52 @@ class TestTikTokMapping:
         assert result["video_url"] == "https://cdn.example/video.mp4"
         assert result["video_duration"] == 12.5
         assert result["is_slideshow"] is False
-        # Page URL must never be stored as video_url
-        assert "tiktok.com/@" not in (result["video_url"] or "")
+        # Direct CDN preferred over watch page when both present.
+        assert result["video_url"].endswith(".mp4")
 
-    def test_page_video_url_not_treated_as_download(self):
+    def test_webvideourl_used_when_apify_omits_download_addr(self):
+        """Seoul-style items: cover+duration+webVideoUrl, empty downloadAddr.
+
+        FAIL if mapper leaves video_url empty — OCR must GET media via yt-dlp.
+        """
         item = {
             "id": "v2",
             "videoUrl": "https://www.tiktok.com/@u/video/v2",
             "webVideoUrl": "https://www.tiktok.com/@u/video/v2",
-            "videoMeta": {"duration": 9},
+            "videoMeta": {
+                "coverUrl": "https://cdn.example/COVER_ONLY.jpg",
+                "duration": 9,
+            },
+            "mediaUrls": [],
+            "isSlideshow": False,
         }
         result = _map_tiktok(item)
-        assert result["video_url"] == ""
+        assert result["video_url"] == "https://www.tiktok.com/@u/video/v2"
+        assert result["url"] == "https://www.tiktok.com/@u/video/v2"
         assert result["video_duration"] == 9.0
+        assert result["cover_url"].endswith("COVER_ONLY.jpg")
+        assert result["slideshow_urls"] == ""
+
+    def test_seoul_fixture_style_maps_watch_url_as_video_source(self):
+        """Fixture shape from unpaid Seoul search — 0 downloadAddr, only webVideoUrl."""
+        item = {
+            "id": "7670101261253053717",
+            "text": "Seoul itinerary",
+            "diggCount": 8588,
+            "playCount": 146275,
+            "webVideoUrl": "https://www.tiktok.com/@aidenandmaddy/video/7670101261253053717",
+            "authorMeta": {"name": "aidenandmaddy"},
+            "videoMeta": {
+                "coverUrl": "https://cdn.example/cover.jpeg",
+                "duration": 89.034,
+            },
+            "isSlideshow": False,
+            "mediaUrls": [],
+        }
+        result = _map_tiktok(item)
+        assert result["video_url"].endswith("/video/7670101261253053717")
+        assert "COVER" not in (result["video_url"] or "").upper()
+        assert result["is_slideshow"] is False
 
 
 class TestInstagramMapping:
@@ -236,6 +269,11 @@ class TestEngagementFilters:
 
     def test_tiktok_low_likes(self):
         assert not _passes_tiktok_filter({"views": 5000, "likes": 10})
+
+    def test_tiktok_likes_below_product_floor(self):
+        """Product path requires likes ≥ 100."""
+        assert not _passes_tiktok_filter({"views": 5000, "likes": 99})
+        assert _passes_tiktok_filter({"views": 5000, "likes": 100})
 
     def test_instagram_passes(self):
         assert _passes_instagram_filter({"views": 1000, "likes": 50})

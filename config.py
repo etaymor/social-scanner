@@ -25,6 +25,8 @@ INSTAGRAM_ACTOR = "apify/instagram-hashtag-scraper"
 
 # Pipeline defaults
 DEFAULT_MAX_POSTS = 100
+# Cheap discover/search path: hard cap ~20 posts (food queries, last ~30 days).
+SEARCH_MAX_POSTS = 20
 EXTRACTION_BATCH_SIZE = 20
 FILTER_BATCH_SIZE = 50
 DEDUP_SCORE_CUTOFF = 85  # rapidfuzz token_sort_ratio threshold
@@ -32,7 +34,7 @@ DEDUP_RELATIVE_THRESHOLD = 0.3  # max normalized distance for merge candidates
 
 # Engagement minimums — skip low-quality posts to save Apify credits
 MIN_VIEWS_TIKTOK = 1000
-MIN_LIKES_TIKTOK = 50
+MIN_LIKES_TIKTOK = 100  # product path: likes ≥ 100
 MIN_VIEWS_INSTAGRAM = 500
 MIN_LIKES_INSTAGRAM = 20
 
