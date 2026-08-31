@@ -31,7 +31,8 @@ class TestDatabase:
         assert row["cnt"] == 0
 
     def test_insert_hashtags_creates_both_platforms(self, conn, city_id):
-        db.insert_hashtags(conn, city_id, ["foodie"])
+        # Explicitly pass both platforms to test multi-platform support
+        db.insert_hashtags(conn, city_id, ["foodie"], platforms=("tiktok", "instagram"))
         rows = conn.execute(
             "SELECT * FROM hashtags WHERE city_id = ?",
             (city_id,),
@@ -41,8 +42,9 @@ class TestDatabase:
         assert platforms == {"tiktok", "instagram"}
 
     def test_insert_hashtags_idempotent(self, conn, city_id):
-        db.insert_hashtags(conn, city_id, ["foodie"])
-        db.insert_hashtags(conn, city_id, ["foodie"])
+        # Explicitly pass both platforms to test idempotency
+        db.insert_hashtags(conn, city_id, ["foodie"], platforms=("tiktok", "instagram"))
+        db.insert_hashtags(conn, city_id, ["foodie"], platforms=("tiktok", "instagram"))
         rows = conn.execute(
             "SELECT * FROM hashtags WHERE city_id = ?",
             (city_id,),
@@ -454,3 +456,65 @@ class TestNormalizeBool:
         from pipeline.filter import _normalize_bool
 
         assert _normalize_bool(val) is False
+
+
+# ---------------------------------------------------------------------------
+# CSV Export test
+# ---------------------------------------------------------------------------
+
+
+class TestCSVExport:
+    def test_export_csv_with_sqlite_rows(self, conn, city_id, tmp_path):
+        """export_csv should handle sqlite3.Row objects (which don't have .get())."""
+        import csv
+
+        from discover import export_csv
+
+        # Insert test places with and without category
+        conn.execute(
+            "INSERT INTO places (city_id, name, type, category, mention_count, virality_score, is_tourist_trap) "
+            "VALUES (?, 'Cafe A', 'cafe', 'food_and_drink', 5, 0.85, 0)",
+            (city_id,),
+        )
+        conn.execute(
+            "INSERT INTO places (city_id, name, type, category, mention_count, virality_score, is_tourist_trap) "
+            "VALUES (?, 'Bar B', 'bar', NULL, 3, 0.75, 0)",
+            (city_id,),
+        )
+        conn.execute(
+            "INSERT INTO places (city_id, name, type, category, mention_count, virality_score, is_tourist_trap) "
+            "VALUES (?, 'Tourist Spot', 'landmark', 'sightseeing', 10, 0.95, 1)",
+            (city_id,),
+        )
+        conn.commit()
+
+        # Export to a temp file
+        output_file = tmp_path / "test_export.csv"
+        result_path = export_csv(conn, city_id, "TestCity", str(output_file))
+
+        assert result_path == str(output_file)
+        assert output_file.exists()
+
+        # Read the CSV and verify contents
+        with open(output_file, "r", newline="") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+
+        # Should have 2 non-trap places
+        assert len(rows) == 2
+
+        # Verify first place (Cafe A)
+        assert rows[0]["rank"] == "1"
+        assert rows[0]["name"] == "Cafe A"
+        assert rows[0]["type"] == "cafe"
+        assert rows[0]["category"] == "food_and_drink"
+        assert rows[0]["mention_count"] == "5"
+        assert rows[0]["virality_score"] == "0.85"
+
+        # Verify second place (Bar B with NULL category)
+        assert rows[1]["rank"] == "2"
+        assert rows[1]["name"] == "Bar B"
+        assert rows[1]["type"] == "bar"
+        assert rows[1]["category"] == ""  # NULL category should export as empty string
+        assert rows[1]["mention_count"] == "3"
+        assert rows[1]["virality_score"] == "0.75"

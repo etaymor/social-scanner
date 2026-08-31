@@ -2,6 +2,7 @@
 
 import logging
 import math
+import re
 import sqlite3
 
 import config
@@ -13,6 +14,32 @@ log = logging.getLogger(__name__)
 
 _TRUTHY = frozenset({"true", "1", "yes"})
 _FALSY = frozenset({"false", "0", "no"})
+
+# Off-city location patterns that should be filtered out
+OFF_CITY_PATTERNS = [
+    r"\bAachen\b",
+    r"\bTucson\b",
+    r"\bLittle Tokyo\b",
+    r"\bUnited States\b",
+    r"\bUSA\b",
+    r"\bU\.S\.A\b",
+    r"\bGermany\b",
+    r"\bArizona\b",
+    r"\bAZ\b",
+]
+
+# Generic city+cuisine patterns (case-insensitive)
+GENERIC_CUISINE_TERMS = [
+    "ramen",
+    "sushi",
+    "cafe",
+    "coffee",
+    "bakery",
+    "izakaya",
+    "restaurant",
+    "bar",
+    "food",
+]
 
 
 def _normalize_bool(value: object) -> bool:
@@ -28,6 +55,98 @@ def _normalize_bool(value: object) -> bool:
         if lower in _FALSY:
             return False
     return False
+
+
+def _is_generic_city_cuisine(name: str, city_name: str) -> bool:
+    """Return True if the name is a generic city + cuisine pattern.
+    
+    Examples: "Tokyo Sushi", "Tokyo Ramen", "Tokyo Cafe"
+    """
+    name_lower = name.lower()
+    city_lower = city_name.lower()
+    
+    # Check if name starts with city name
+    if not name_lower.startswith(city_lower):
+        return False
+    
+    # Remove city name and check if remainder is a generic cuisine term
+    remainder = name_lower[len(city_lower):].strip()
+    return remainder in GENERIC_CUISINE_TERMS
+
+
+def _has_off_city_location(caption: str) -> bool:
+    """Return True if the caption contains an off-city location tag.
+    
+    Examples: "📍 Location tag: Tucson", "📍 Location tag: Aachen, Germany"
+    """
+    if not caption:
+        return False
+    
+    for pattern in OFF_CITY_PATTERNS:
+        if re.search(pattern, caption, re.IGNORECASE):
+            return True
+    
+    return False
+
+
+def filter_generic_and_off_city(
+    conn: sqlite3.Connection,
+    city_id: int,
+    city_name: str,
+) -> int:
+    """Filter out generic city+cuisine names and places with off-city location tags.
+    
+    Returns the number of places marked as hidden.
+    """
+    places = db.get_all_places(conn, city_id)
+    if not places:
+        log.info("No places to filter for generic names in %s", city_name)
+        return 0
+    
+    hidden_count = 0
+    
+    for place in places:
+        should_hide = False
+        reason = ""
+        
+        # Check for generic city+cuisine pattern
+        if _is_generic_city_cuisine(place["name"], city_name):
+            should_hide = True
+            reason = f"Generic city+cuisine: {place['name']}"
+        
+        # Check for off-city location tags in linked posts
+        if not should_hide:
+            # Get sample caption or check linked posts
+            posts = conn.execute(
+                """SELECT rp.caption 
+                   FROM place_posts pp 
+                   JOIN raw_posts rp ON pp.post_id = rp.id 
+                   WHERE pp.place_id = ?
+                   LIMIT 5""",
+                (place["id"],),
+            ).fetchall()
+            
+            for post in posts:
+                if _has_off_city_location(post["caption"]):
+                    should_hide = True
+                    reason = f"Off-city location tag in caption"
+                    break
+        
+        if should_hide:
+            # Mark as hidden by setting is_tourist_trap=TRUE (reusing existing flag)
+            db.update_tourist_trap(conn, place["id"], True)
+            hidden_count += 1
+            log.debug("  Filtered: %s — %s", place["name"], reason)
+    
+    if hidden_count:
+        conn.commit()
+        log.info(
+            "Filtered %d generic/off-city places for %s",
+            hidden_count,
+            city_name,
+        )
+    
+    return hidden_count
 
 
 PROMPT_TEMPLATE = """\

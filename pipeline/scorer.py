@@ -28,6 +28,49 @@ def _normalize_name(name: str) -> str:
     return " ".join(n.split())
 
 
+# Tokens that appear in many unrelated venue names — never use alone for merge.
+_GENERIC_MERGE_TOKENS = frozenset(
+    {
+        "gangnam",
+        "hongdae",
+        "itaewon",
+        "myeongdong",
+        "myeong",
+        "seoul",
+        "tokyo",
+        "korean",
+        "korea",
+        "japan",
+        "japanese",
+        "restaurant",
+        "cafe",
+        "bakery",
+        "market",
+        "street",
+        "park",
+        "palace",
+        "bbq",
+        "ramen",
+        "sushi",
+        "style",
+        "main",
+        "branch",
+        "house",
+        "food",
+        "pot",
+        "rice",
+    }
+)
+
+
+def _shared_merge_tokens(na: str, nb: str) -> set[str]:
+    return {
+        t
+        for t in set(na.split()) & set(nb.split())
+        if len(t) >= 6 and t not in _GENERIC_MERGE_TOKENS
+    }
+
+
 def _build_merge_groups(pairs: list[tuple[int, int]], all_ids: set[int]) -> list[set[int]]:
     """Given duplicate pairs, return connected components (union-find)."""
     parent: dict[int, int] = {i: i for i in all_ids}
@@ -89,13 +132,21 @@ def _find_candidate_pairs(
                 pairs.append((ids[i], ids[j]))
                 continue
 
-            # Containment check for pairs not caught by token_sort_ratio
+            # Prefix containment only (safer than substring). "hanmiok" →
+            # "hanmiok brisket bbq" merges; "salt" ↛ "soha salt pond".
             na, nb = names[i], names[j]
-            if na in nb or nb in na:
-                longer = max(len(na), len(nb))
-                shorter = min(len(na), len(nb))
-                if longer > 0 and (shorter / longer) > config.DEDUP_RELATIVE_THRESHOLD:
-                    pairs.append((ids[i], ids[j]))
+            shorter, longer = (na, nb) if len(na) <= len(nb) else (nb, na)
+            if (
+                len(shorter) >= 6
+                and longer.startswith(shorter)
+                and (len(shorter) / len(longer)) > config.DEDUP_RELATIVE_THRESHOLD
+            ):
+                pairs.append((ids[i], ids[j]))
+                continue
+
+            # Shared distinctive token (e.g. "ilpyeon sirloin" ↔ "korean bbq ilpyeon …")
+            if _shared_merge_tokens(na, nb):
+                pairs.append((ids[i], ids[j]))
 
     return pairs
 
@@ -103,11 +154,49 @@ def _find_candidate_pairs(
 def _ask_llm_to_confirm_groups(
     group_places: list[sqlite3.Row],
     city_name: str,
+    *,
+    auto_merge_prefix: bool = False,
 ) -> list[list[int]]:
     """Ask the LLM which places in a merge group are truly the same.
 
     Returns a list of confirmed sub-groups, each being a list of place IDs.
+    When ``auto_merge_prefix`` is True (heuristic replay) or the LLM fails,
+    merge names where one is a clear prefix of another (len≥6).
     """
+    def _prefix_merge(places: list[sqlite3.Row]) -> list[list[int]]:
+        ids = [p["id"] for p in places]
+        norms = {_normalize_name(p["name"]): p["id"] for p in places}
+        parent = {i: i for i in ids}
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a: int, b: int) -> None:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        names = list(norms.keys())
+        for i, na in enumerate(names):
+            for nb in names[i + 1 :]:
+                shorter, longer = (na, nb) if len(na) <= len(nb) else (nb, na)
+                if len(shorter) >= 6 and longer.startswith(shorter):
+                    union(norms[na], norms[nb])
+                    continue
+                shared = _shared_merge_tokens(na, nb)
+                if shared:
+                    union(norms[na], norms[nb])
+        groups: dict[int, list[int]] = {}
+        for i in ids:
+            groups.setdefault(find(i), []).append(i)
+        return [g for g in groups.values() if len(g) >= 2]
+
+    if auto_merge_prefix:
+        return _prefix_merge(group_places)
+
     numbered = "\n".join(f"  {idx}. {p['name']}" for idx, p in enumerate(group_places))
     prompt = (
         f"These place names were found in social media posts about {city_name}.\n"
@@ -122,8 +211,8 @@ def _ask_llm_to_confirm_groups(
     try:
         result = call_llm_json(prompt, temperature=0.3)
     except LLMError:
-        log.warning("LLM dedup confirmation failed; skipping merge for this group")
-        return []
+        log.warning("LLM dedup confirmation failed; using prefix-merge fallback")
+        return _prefix_merge(group_places)
 
     raw_groups: list[list[int]] = result.get("groups", []) if isinstance(result, dict) else []
     if not isinstance(raw_groups, list):
@@ -133,7 +222,6 @@ def _ask_llm_to_confirm_groups(
     for g in raw_groups:
         if not isinstance(g, list) or len(g) < 2:
             continue
-        # Convert indices to place IDs, validating bounds
         place_ids: list[int] = []
         for idx in g:
             if isinstance(idx, int) and 0 <= idx < len(group_places):
@@ -305,6 +393,7 @@ def deduplicate_and_score(
     log.info("=== Step 4: Dedup & Score — %s ===", city_name)
 
     merged = _perform_dedup(conn, city_id, city_name)
+    db.sync_mention_counts(conn, city_id)
     scored = _score_places(conn, city_id)
 
     log.info("Done — merged %d duplicates, scored %d places", merged, scored)

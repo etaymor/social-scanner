@@ -64,6 +64,14 @@ def print_summary(
     print()
 
 
+def _safe_get(row_or_dict, key: str, default=None):
+    """Get a value from either a sqlite3.Row or dict, with a default fallback."""
+    try:
+        return row_or_dict[key]
+    except (KeyError, IndexError):
+        return default
+
+
 def export_csv(
     conn: sqlite3.Connection, city_id: int, city_name: str, filepath: str | None = None
 ) -> str:
@@ -83,7 +91,7 @@ def export_csv(
                     i,
                     p["name"],
                     p["type"],
-                    p.get("category", ""),
+                    _safe_get(p, "category", ""),
                     p["mention_count"],
                     p["virality_score"],
                 ]
@@ -112,9 +120,51 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Max posts per hashtag per platform (default: {DEFAULT_MAX_POSTS})",
     )
     parser.add_argument(
+        "--window-days",
+        type=int,
+        default=30,
+        help="Only include posts from the last N days (default: 30)",
+    )
+    parser.add_argument(
+        "--search-mode",
+        action="store_true",
+        help="Use TikTok search queries instead of only hashtags (includes neighborhood+food combos)",
+    )
+    parser.add_argument(
+        "--repend-hashtags",
+        action="store_true",
+        help="Reset completed hashtags to pending for re-scraping without deleting existing data",
+    )
+    parser.add_argument(
         "--skip-scrape",
         action="store_true",
         help="Skip Apify scraping, run extraction on existing data",
+    )
+    parser.add_argument(
+        "--from-json",
+        metavar="PATH",
+        help="Import an existing Apify dataset JSON (no Apify spend) then continue the pipeline",
+    )
+    parser.add_argument(
+        "--skip-ocr",
+        action="store_true",
+        help="Skip visual OCR (on-screen names will be missing — use only for captions-only replay)",
+    )
+    parser.add_argument(
+        "--heuristic-extract",
+        action="store_true",
+        help="Extract places via listicle/OCR/subtitle heuristics only (no OpenRouter LLM)",
+    )
+    parser.add_argument(
+        "--export-guide",
+        action="store_true",
+        help="Export repeating-saves city guide JSON/CSV after ranking",
+    )
+    parser.add_argument(
+        "--min-authors",
+        type=int,
+        default=1,
+        help="Repeating-saves gate: min distinct authors (default: 1)",
     )
     parser.add_argument(
         "--retry-failed",
@@ -171,41 +221,98 @@ def main() -> None:
             if reset_count:
                 log.info("Reset %d failed hashtags to pending for retry", reset_count)
 
-        # Step 1: Hashtag Generation
-        from pipeline.hashtags import generate_hashtags
+        # Repend completed hashtags if requested (for windowed re-scraping)
+        if args.repend_hashtags:
+            # Only repend TikTok food_and_drink hashtags by default to avoid
+            # re-queuing Instagram and nightlife in the same actor call
+            repend_query = """
+                UPDATE hashtags 
+                SET scrape_status = 'pending' 
+                WHERE city_id = ? 
+                  AND scrape_status = 'completed'
+                  AND platform = 'tiktok'
+                  AND (category IS NULL OR category = 'food_and_drink')
+            """
+            repend_count = conn.execute(repend_query, (city_id,)).rowcount
+            conn.commit()
+            if repend_count:
+                log.info(
+                    "Reset %d completed TikTok food_and_drink hashtags to pending for windowed re-scraping",
+                    repend_count,
+                )
 
+        # Step 1: Hashtag Generation (skipped on pure JSON replay)
         category = args.category
-        if category:
-            log.info(
-                "Step 1/5: Generating %s hashtags for %s...",
-                CATEGORIES[category]["label"],
-                city_name,
-            )
-        else:
-            log.info("Step 1/5: Generating hashtags for %s...", city_name)
-        tags = generate_hashtags(conn, city_id, city_name, category=category)
-        log.info("Generated %d unique hashtags", len(tags))
+        if not args.from_json:
+            from pipeline.hashtags import generate_hashtags
 
-        # Step 2: Apify Scraping
-        if not args.skip_scrape:
+            if category:
+                log.info(
+                    "Step 1/5: Generating %s hashtags for %s...",
+                    CATEGORIES[category]["label"],
+                    city_name,
+                )
+            else:
+                log.info("Step 1/5: Generating hashtags for %s...", city_name)
+            tags = generate_hashtags(conn, city_id, city_name, category=category)
+            log.info("Generated %d unique hashtags", len(tags))
+        else:
+            log.info("Step 1/5: Skipping hashtag generation (--from-json)")
+
+        # Step 2: Apify Scraping OR JSON replay
+        if args.from_json:
+            from pipeline.replay import import_apify_json
+
+            log.info("Step 2/5: Replaying Apify JSON from %s (no Apify spend)...", args.from_json)
+            import_apify_json(
+                conn,
+                city_id,
+                args.from_json,
+                window_days=args.window_days,
+            )
+        elif not args.skip_scrape:
             from pipeline.scraper import scrape_posts
 
             log.info("Step 2/5: Scraping social media posts...")
-            scrape_posts(conn, city_id, city_name, max_posts=args.max_posts)
+            scrape_posts(
+                conn,
+                city_id,
+                city_name,
+                max_posts=args.max_posts,
+                window_days=args.window_days,
+                search_mode=args.search_mode,
+            )
         else:
             log.info("Step 2/5: Skipping scraping (--skip-scrape)")
 
-        # Step 2.5: Visual OCR — extract on-screen text from cover images
-        from pipeline.ocr import extract_cover_text
+        # Step 2.4: Subtitle enrichment (free — uses links already on posts)
+        from pipeline.subtitles import enrich_captions_with_subtitles
 
-        log.info("Step 2.5: Running visual OCR on cover images...")
-        extract_cover_text(conn, city_id, city_name)
+        log.info("Step 2.4: Enriching captions from subtitle links...")
+        enrich_captions_with_subtitles(conn, city_id, city_name)
 
-        # Step 3: LLM Place Extraction
+        # Step 2.5: Visual OCR — extract on-screen text from cover/slideshow images
+        if args.skip_ocr:
+            log.warning(
+                "Step 2.5: Skipping OCR (--skip-ocr). On-screen venue names will be missing."
+            )
+        else:
+            from pipeline.ocr import OCRError, extract_cover_text
+
+            log.info("Step 2.5: Running visual OCR on cover/slideshow images...")
+            try:
+                extract_cover_text(conn, city_id, city_name)
+            except OCRError as e:
+                print(f"\n  OCR failed closed: {e}\n", file=sys.stderr)
+                sys.exit(2)
+
+        # Step 3: Place Extraction
         from pipeline.extractor import extract_places
 
         log.info("Step 3/5: Extracting places from captions...")
-        extract_places(conn, city_id, city_name)
+        extract_places(
+            conn, city_id, city_name, heuristic_only=args.heuristic_extract
+        )
 
         # Step 4: Deduplication + Scoring
         from pipeline.scorer import deduplicate_and_score
@@ -213,17 +320,48 @@ def main() -> None:
         log.info("Step 4/5: Deduplicating and scoring places...")
         deduplicate_and_score(conn, city_id, city_name)
 
-        # Step 5: Tourist Trap Filter
-        from pipeline.filter import filter_tourist_traps
+        # Step 5a: Filter generic names and off-city locations
+        from pipeline.filter import filter_generic_and_off_city
 
-        log.info("Step 5/5: Filtering tourist traps...")
-        filter_tourist_traps(conn, city_id, city_name)
+        log.info("Step 5a/5: Filtering generic names and off-city locations...")
+        filter_generic_and_off_city(conn, city_id, city_name)
+
+        # Step 5b: Tourist Trap Filter (skip when heuristic-only — needs LLM)
+        if not args.heuristic_extract:
+            from pipeline.filter import filter_tourist_traps
+
+            log.info("Step 5b/5: Filtering tourist traps...")
+            filter_tourist_traps(conn, city_id, city_name)
+        else:
+            log.info("Step 5b/5: Skipping tourist-trap LLM filter (--heuristic-extract)")
 
         # Output
         print_summary(conn, city_id, city_name, category=category)
 
         if args.export_csv:
             export_csv(conn, city_id, city_name)
+
+        if args.export_guide:
+            from pathlib import Path
+
+            from pipeline.city_saved_places import export_city_guide, rank_repeating_saves
+
+            guide = rank_repeating_saves(
+                city_name,
+                category=category,
+                window_days=args.window_days,
+                min_distinct_authors=args.min_authors,
+                include_near_misses=True,
+                conn=conn,
+            )
+            safe = city_name.lower().replace(" ", "_")
+            json_path = Path(f"{safe}_last_{args.window_days}_days.json")
+            csv_path = Path(f"{safe}_last_{args.window_days}_days.csv")
+            export_city_guide(guide, json_path, fmt="json")
+            export_city_guide(guide, csv_path, fmt="csv")
+            print(
+                f"\n  Guide export: {len(guide.places)} rows → {json_path} / {csv_path}"
+            )
 
     except CreditsExhaustedError:
         print(

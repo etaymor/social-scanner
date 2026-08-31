@@ -1,12 +1,16 @@
 """Visual style palettes and prompt composition for scroll-stopping image generation.
 
 Centralises all creative direction for slideshow images — variety palettes,
-composition rules, negative guidance, and deterministic style selection.
+composition rules, negative guidance, deterministic style selection, and
+weight-biased style selection for the analytics intelligence loop.
 """
 
 import hashlib
+import logging
 import random
 from typing import TypedDict
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Type definitions
@@ -23,6 +27,13 @@ class SlideshowStyle(TypedDict):
     weather: StyleOption
     perspective: StyleOption
     color_mood: StyleOption
+
+
+class ImagePreset(TypedDict):
+    name: str            # e.g. "bright_hazy_vista"
+    style: str           # analytics key, e.g. "high_key_atmospheric_travel"
+    template: str        # prompt with [INSERT SUBJECT HERE] placeholder
+    negative_prompt: str
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +223,82 @@ _INCOMPATIBLE: set[tuple[str, str]] = {
 }
 
 
+_PRESET_USE_PROBABILITY = 0.7  # 70% chance to use preset, 30% composited
+
+
+# ---------------------------------------------------------------------------
+# Image presets — self-contained prompt templates per visual mood
+# ---------------------------------------------------------------------------
+
+IMAGE_PRESETS: list[ImagePreset] = [
+    {
+        "name": "bright_hazy_vista",
+        "style": "high_key_atmospheric_travel",
+        "template": (
+            "[INSERT SUBJECT HERE] captured with a bright, high-key visual aesthetic. "
+            "The image is dominated by a strong, diffused, high-angle light source "
+            "(such as the sun through a hazy layer) that creates a soft, misty "
+            "atmospheric haze, reducing background contrast. In stark, high-contrast "
+            "opposition, the extreme foreground elements are sharply defined with very "
+            "deep, almost pitch-black, crushed shadows. The foreground features "
+            "intricate, complex textures (like dense, intricate patterns or materials) "
+            "that appear sharp and detailed against the soft background. The entire "
+            "composition has a cool, blue-ish environmental tone. High-resolution, "
+            "professional travel-journalism style, 9:16 aspect ratio."
+        ),
+        "negative_prompt": (
+            "oversaturated, golden hour, flat lighting, warm tones, blurry foreground"
+        ),
+    },
+    {
+        "name": "moody_symmetry",
+        "style": "low_key_architectural",
+        "template": (
+            "A perfectly symmetrical, low-angle vertical photograph of "
+            "[INSERT SUBJECT HERE]. The composition is defined by a rhythmic "
+            "repetition of dark structural elements and high-contrast vaulted shapes "
+            "that create a deep one-point perspective. The color palette is dominated "
+            "by rich, dark earth tones and polished textures. Dramatic low-key "
+            "lighting creates deep shadows and warm, focused highlights on "
+            "architectural details. High-resolution textures, sharp focus throughout "
+            "the frame, professional architectural photography style, 9:16 aspect ratio."
+        ),
+        "negative_prompt": (
+            "bright, airy, flat lighting, outdoor daylight, cluttered, blurry, people"
+        ),
+    },
+    {
+        "name": "travel_aesthetic",
+        "style": "photorealistic_travel",
+        "template": (
+            "[INSERT SUBJECT HERE] captured in a high-resolution cinematic travel "
+            "photography style. Sharp foreground details with clear textures, warm "
+            "directional sunlight from a low angle creating soft shadows. Vast, "
+            "open-air composition with a soft atmospheric haze on the horizon "
+            "transitioning into a deep, clear blue sky. Professional 35mm lens "
+            "aesthetic, natural earth-tone color palette, 9:16 aspect ratio."
+        ),
+        "negative_prompt": (
+            "oversaturated, blurry, distorted, crowded, urban clutter"
+        ),
+    },
+]
+
+PRESET_BY_NAME: dict[str, ImagePreset] = {p["name"]: p for p in IMAGE_PRESETS}
+
+# Category → preferred preset name
+CATEGORY_PRESET_MAP: dict[str, str] = {
+    "outdoors_and_nature": "bright_hazy_vista",
+    "sights_and_attractions": "moody_symmetry",
+    "arts_and_culture": "moody_symmetry",
+    "food_and_drink": "travel_aesthetic",
+    "nightlife": "travel_aesthetic",
+    "shopping": "travel_aesthetic",
+    "places_to_stay": "travel_aesthetic",
+    "activities_and_experiences": "travel_aesthetic",
+}
+
+
 def _is_compatible(style: SlideshowStyle) -> bool:
     """Check that no two selections clash."""
     names = [
@@ -259,6 +346,50 @@ IMAGE_SYSTEM_PROMPT = (
     "feel like they could step into the scene."
 )
 
+# Universal negatives shared by both composited prompts and presets
+NEGATIVE_GUIDANCE_CORE = (
+    "CRITICAL: Do NOT render any text, words, letters, numbers, signs, labels, "
+    "captions, titles, or typography of any kind anywhere in the image. "
+    "No watermarks, no logos, no UI elements, no borders, no signage. "
+    "No people looking directly at camera, no posed selfies, no group photos. "
+    "No oversaturated HDR look, no AI glow effect, no plastic skin texture. "
+    "No clipart or illustrated elements. No collage or split-screen layouts."
+)
+
+# ---------------------------------------------------------------------------
+# Preset selection & prompt building
+# ---------------------------------------------------------------------------
+
+
+def select_preset_for_place(category: str) -> ImagePreset | None:
+    """Pick an image preset for a place based on its category.
+
+    Returns the matched :class:`ImagePreset` ~70% of the time and *None*
+    (meaning fall back to composited style suffix) ~30% of the time.
+    """
+    preset_name = CATEGORY_PRESET_MAP.get(category)
+    if not preset_name:
+        return None
+    if random.random() > _PRESET_USE_PROBABILITY:
+        return None
+    return PRESET_BY_NAME[preset_name]
+
+
+def build_preset_prompt(preset: ImagePreset, subject: str) -> str:
+    """Build a complete image generation prompt from a preset and subject.
+
+    Replaces ``[INSERT SUBJECT HERE]`` in the preset template with *subject*
+    (the enrichment image_prompt), then appends the preset's negative prompt
+    and universal negative guidance.
+    """
+    body = preset["template"].replace("[INSERT SUBJECT HERE]", subject)
+    return (
+        f"{body} "
+        f"AVOID: {preset['negative_prompt']}. "
+        f"{NEGATIVE_GUIDANCE_CORE}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Selection & assembly
 # ---------------------------------------------------------------------------
@@ -271,6 +402,10 @@ def select_slideshow_style(city: str, date_str: str) -> SlideshowStyle:
 
     Seeded from *city + date_str* so re-runs on the same day produce the same
     style, but different cities or different dates get variety.
+
+    Note: This is the deterministic (unweighted) version.  For weight-biased
+    selection from the analytics intelligence loop, use
+    :func:`select_weighted_style` instead.
     """
     seed = int(hashlib.sha256(f"{city.lower().strip()}:{date_str}".encode()).hexdigest(), 16)
     rng = random.Random(seed)
@@ -286,6 +421,57 @@ def select_slideshow_style(city: str, date_str: str) -> SlideshowStyle:
             return style
 
     # Fallback: safe combination
+    return {
+        "time_of_day": TIME_OF_DAY[0],  # golden_hour
+        "weather": WEATHER_MOOD[1],  # clear
+        "perspective": PERSPECTIVE[0],  # street_level
+        "color_mood": COLOR_MOOD[0],  # warm_analog
+    }
+
+
+def select_weighted_style(weights: dict[str, dict[str, float]] | None = None) -> SlideshowStyle:
+    """Select a visual style combination biased by performance weights.
+
+    Unlike :func:`select_slideshow_style`, this version does NOT use
+    city/date seeding.  Each call is intentionally random, biased by the
+    per-axis weights from ``performance_weights.json``.
+
+    Args:
+        weights: Nested dict ``{dimension: {value: weight, ...}, ...}``
+            as returned by ``intelligence.read_weights()``.  If *None* or
+            empty, all options are equally likely.
+
+    Returns:
+        A :class:`SlideshowStyle` dict with compatible axis selections.
+    """
+    if weights is None:
+        weights = {}
+
+    def _pick_axis(axis_options: list[StyleOption], dim_key: str) -> StyleOption:
+        dim_weights = weights.get(dim_key, {})
+        names = [opt["name"] for opt in axis_options]
+        w = [dim_weights.get(n, 1.0) for n in names]
+        return random.choices(axis_options, weights=w, k=1)[0]
+
+    for _ in range(_MAX_REROLLS):
+        style: SlideshowStyle = {
+            "time_of_day": _pick_axis(TIME_OF_DAY, "time_of_day"),
+            "weather": _pick_axis(WEATHER_MOOD, "weather"),
+            "perspective": _pick_axis(PERSPECTIVE, "perspective"),
+            "color_mood": _pick_axis(COLOR_MOOD, "color_mood"),
+        }
+        if _is_compatible(style):
+            log.debug(
+                "Weighted style selected: %s + %s + %s + %s",
+                style["time_of_day"]["name"],
+                style["weather"]["name"],
+                style["perspective"]["name"],
+                style["color_mood"]["name"],
+            )
+            return style
+
+    # Fallback: safe combination
+    log.warning("Max rerolls reached in select_weighted_style, using fallback")
     return {
         "time_of_day": TIME_OF_DAY[0],  # golden_hour
         "weather": WEATHER_MOOD[1],  # clear
