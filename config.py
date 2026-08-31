@@ -65,6 +65,8 @@ OCR_USE_TESSERACT = os.getenv("OCR_USE_TESSERACT", "true").lower() in (
     "yes",
 )
 OCR_TESSERACT_LANG = os.getenv("OCR_TESSERACT_LANG", "eng+kor")
+# Video OCR: sample one frame every N seconds (must stay in the 1–2s band).
+OCR_VIDEO_FRAME_INTERVAL = float(os.getenv("OCR_VIDEO_FRAME_INTERVAL", "1.5"))
 
 # Postiz (TikTok posting)
 POSTIZ_API_KEY = os.getenv("POSTIZ_API_KEY", "")

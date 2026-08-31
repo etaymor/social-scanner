@@ -123,11 +123,14 @@ def init_db(conn: sqlite3.Connection) -> None:
         if "duplicate column name" not in str(e):
             raise
 
-    # Migration — OCR / subtitle / slideshow enrichment columns
+    # Migration — OCR / subtitle / slideshow / video enrichment columns
     for col, typedef in (
         ("ocr_status", "TEXT DEFAULT 'pending'"),
         ("subtitle_urls", "TEXT DEFAULT NULL"),
         ("slideshow_urls", "TEXT DEFAULT NULL"),
+        ("video_url", "TEXT DEFAULT NULL"),
+        ("video_duration", "REAL DEFAULT NULL"),
+        ("is_slideshow", "BOOLEAN DEFAULT FALSE"),
     ):
         try:
             conn.execute(f"ALTER TABLE raw_posts ADD COLUMN {col} {typedef}")
@@ -395,8 +398,9 @@ def insert_post(
             """INSERT OR IGNORE INTO raw_posts
                (city_id, platform, post_id, caption, likes, comments, shares,
                 saves, views, url, author, created_at, cover_url, posted_at,
-                subtitle_urls, slideshow_urls, ocr_status)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')""",
+                subtitle_urls, slideshow_urls, video_url, video_duration,
+                is_slideshow, ocr_status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')""",
             (
                 city_id,
                 platform,
@@ -414,6 +418,9 @@ def insert_post(
                 posted_at,
                 post_data.get("subtitle_urls"),
                 post_data.get("slideshow_urls"),
+                post_data.get("video_url"),
+                post_data.get("video_duration"),
+                1 if post_data.get("is_slideshow") else 0,
             ),
         )
         if cur.rowcount == 0:

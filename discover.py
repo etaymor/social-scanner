@@ -291,7 +291,7 @@ def main() -> None:
         log.info("Step 2.4: Enriching captions from subtitle links...")
         enrich_captions_with_subtitles(conn, city_id, city_name)
 
-        # Step 2.5: Visual OCR — extract on-screen text from cover/slideshow images
+        # Step 2.5: Visual OCR — media timeline (all slideshow frames + video samples)
         if args.skip_ocr:
             log.warning(
                 "Step 2.5: Skipping OCR (--skip-ocr). On-screen venue names will be missing."
@@ -299,8 +299,11 @@ def main() -> None:
         else:
             from pipeline.ocr import extract_cover_text
 
-            log.info("Step 2.5: Running visual OCR on cover/slideshow images...")
-            # Never fail-closed: engine 404s fall through; gaps mark posts failed.
+            log.info(
+                "Step 2.5: Running visual OCR on media timelines "
+                "(slideshow frames + 1–2s video samples)..."
+            )
+            # Never fail-closed: engine/frame misses fall through; gaps mark posts failed.
             extract_cover_text(conn, city_id, city_name)
 
         # Step 3: Place Extraction

@@ -95,6 +95,7 @@ A place discovery pipeline that:
    | `OPENROUTER_API_KEY` | Yes      | —                                | Your OpenRouter API key                          |
    | `OPENROUTER_MODEL`   | No       | `google/gemini-3.1-flash-lite`   | Caption extract / JSON via OpenRouter            |
    | `OCR_MODEL`          | No       | `google/gemini-3.1-flash-lite`   | Vision OCR primary (not `*-flash-image`)         |
+   | `OCR_VIDEO_FRAME_INTERVAL` | No | `1.5`                          | Seconds between video OCR samples (clamped 1–2)  |
    | `GEMINI_MODEL`       | No       | `google/gemini-3.1-flash-image`  | Slideshow image gen only (Nano Banana 2)         |
    | `DB_PATH`            | No       | `places.db`                      | Path to the SQLite database file                 |
    | `FLASK_DEBUG`        | No       | `false`                          | Set to `true` for Flask debug mode               |
@@ -209,7 +210,7 @@ social-scanner/
 │   ├── db.py                # Database schema, queries, and migrations
 │   ├── hashtags.py          # Step 1: LLM hashtag generation
 │   ├── scraper.py           # Step 2: Apify TikTok scraping
-│   ├── ocr.py               # Step 2.5: Visual OCR on cover images
+│   ├── ocr.py               # Step 2.5: Visual OCR on media timeline (slideshow + video frames)
 │   ├── extractor.py         # Step 3: LLM place extraction from captions
 │   ├── scorer.py            # Step 4: Fuzzy dedup + virality scoring
 │   ├── filter.py            # Step 5: LLM tourist trap classification
@@ -248,7 +249,8 @@ The pipeline runs 5 sequential steps, each building on the previous:
 │  (Note: Instagram scraping exists but is not used)      │
 ├─────────────────────────────────────────────────────────┤
 │  Step 2.5: Visual OCR                                   │
-│  Extracts on-screen text from TikTok cover images       │
+│  On-screen text from ALL slideshow frames + video       │
+│  samples every 1–2s (union per post; never cover-only)  │
 ├─────────────────────────────────────────────────────────┤
 │  Step 3: Place Extraction                               │
 │  LLM extracts named places from captions (batches of 20)│
