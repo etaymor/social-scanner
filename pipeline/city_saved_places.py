@@ -135,6 +135,7 @@ def rank_repeating_saves(
     import sqlite3
     from datetime import datetime, timedelta, timezone
     from . import db
+    from .listicle import is_overlay_junk
 
     own_conn = conn is None
     if own_conn:
@@ -168,6 +169,9 @@ def rank_repeating_saves(
         near_misses: list[RankedPlace] = []
 
         for place in places:
+            # Hide leftover overlay junk even when place_posts predate the upsert filter
+            if is_overlay_junk(place["name"]):
+                continue
             place_id = place["id"]
 
             post_query = """

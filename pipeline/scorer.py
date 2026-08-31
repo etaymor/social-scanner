@@ -10,6 +10,7 @@ from rapidfuzz import process as rfprocess
 import config
 
 from . import db
+from .listicle import is_overlay_junk
 from .llm import LLMError, call_llm_json
 
 log = logging.getLogger(__name__)
@@ -276,9 +277,18 @@ def _perform_dedup(
             if len(remaining_ids) < 2:
                 continue
 
-            # Pick the place with the highest mention count as canonical
+            # Never promote OCR overlay junk (floors, city-only, dish generics)
+            # as the canonical name — only merge into a real venue when one exists.
             subgroup_places = [place_by_id[pid] for pid in remaining_ids]
-            canonical = max(subgroup_places, key=lambda p: p["mention_count"])
+            non_junk = [p for p in subgroup_places if not is_overlay_junk(p["name"])]
+            if not non_junk:
+                log.debug(
+                    "Skipping merge of overlay-junk-only group: %s",
+                    [p["name"] for p in subgroup_places],
+                )
+                continue
+
+            canonical = max(non_junk, key=lambda p: p["mention_count"])
             merge_ids = [p["id"] for p in subgroup_places if p["id"] != canonical["id"]]
 
             if not merge_ids:
