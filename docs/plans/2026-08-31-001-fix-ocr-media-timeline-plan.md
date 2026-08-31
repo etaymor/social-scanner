@@ -1,68 +1,39 @@
 ---
-title: "fix: OCR unit = per-post media timeline (not cover_url)"
+title: "fix: OCR media timeline — ingest slideshow URLs + video 1–2s samples"
 type: fix
 status: completed
 date: 2026-08-31
 ---
 
-# fix: OCR unit = per-post media timeline (not cover_url)
+# fix: OCR media timeline — ingest slideshow URLs + video 1–2s samples
 
-## Problem
+## Architecture (read of main `8c83dd5`)
 
-After PR #10, a Seoul skip-scrape OCR run on existing posts OCRed **cover thumbnails only**. Result: high "enriched" counts with low venue density (max `mention_count` 4, no 10+ venues). On-screen venue names live in:
+OCR is a **post-scrape caption enricher**. On main, `extract_cover_text` already OCRs `cover_url` **plus every** newline-separated `slideshow_urls` line. The Seoul cover-only run happened because those extra URLs were **empty in `raw_posts`**, not because the OCR loop cannot take multiple stills.
 
-1. **Every slideshow / photo-mode frame** (not the cover alone)
-2. **Sampled frames of the actual video** (not the cover thumbnail)
+| Field | Mapper source (main) | Notes |
+| --- | --- | --- |
+| `cover_url` | `videoMeta.coverUrl` / `originalCoverUrl` | Always present on TikTok items |
+| `slideshow_urls` | `mediaUrls` then `slideshowImageLinks` / `imageUrls` | Empty in Seoul fixture → cover-only OCR |
+| `url` | `webVideoUrl` | Watch page, **not** bytes |
+| video download | *(dropped)* | No `video_url` / duration / `isSlideshow` columns |
+| Actor flags | `shouldDownloadSlideshowImages=True`, covers off, **no** video download flag | Instagram: `displayUrl` only |
 
-Cover-only is the wrong OCR unit.
+## Settled
 
-## Settled (user-directed)
-
-| Decision | Choice |
-| --- | --- |
-| Slideshow OCR | OCR **all** slideshow/photo-mode frames for a post |
-| Video OCR | Grab one frame every **1–2 seconds**, OCR those frames |
-| Aggregation | **Union** on-screen text per post before extraction |
-| Engine chain | Keep PR #10: Tesseract → `google/gemini-3.1-flash-lite` → `google/gemini-3-flash-preview` |
-| Fail behavior | **Never fail-closed** — one frame/engine miss must not abort the city run |
-| Apify | **No** Apify spend, no live scrape, no paid download-slideshows actor required to land the code |
-| Image-gen models | Never OCR with `*-flash-image` |
+1. **Slideshow** — Prove ingest persists **every** slide URL (`mediaUrls` and link dicts incl. `tiktokLink`). OCR loop is not the slideshow bug unless URLs never land. Tests **must fail** if the mapper drops `mediaUrls`.
+2. **Video 1–2s samples (NEW)** — Persist downloadable `video_url` + `video_duration` (+ `is_slideshow`) from Apify item fields when present. Land the code **without** a new paid Apify run (replay / synthetic JSON). `ffmpeg` samples every 1–2s; reuse PR #10 engine chain. Download/ffmpeg miss → `ocr_status=failed` for that post; **city continues**. Never OCR `*-flash-image`. Do **not** also OCR cover at t=0 when video samples include t=0 (no double-count).
+3. **Tests that fail** cover-only success, dropped `mediaUrls`, and zero video samples on a synthetic clip of known duration.
 
 ## Rejected
 
-- Cover-only OCR as the primary / sufficient unit for slideshow or video posts.
+- Treating cover-only OCR as a sufficient unit for slideshow/video posts.
+- Soft-succeeding a video post via cover when download/ffmpeg misses (recreates Seoul false enrichment).
+- Apify spend / live scrape to land this PR.
 
-## Verified facts (inspect, not assume)
+## Implementation
 
-- `pipeline/ocr.py` `_image_urls_for_post` already concatenates `cover_url` + newline-split `slideshow_urls`, but Seoul Apify items in `tests/fixtures/seoul_apify_sample.json` have **empty `mediaUrls`** and no `slideshowImageLinks` — so OCR collapses to cover.
-- Scraper already sets `shouldDownloadSlideshowImages=True` for new scrapes; `_slideshow_urls` misses `tiktokLink` on slideshow link dicts (Apify samples use `tiktokLink` + `downloadLink`).
-- Free-scraper video items expose `videoMeta.duration` + cover URLs, not always a playable MP4 URL. Direct CDN / `downloadAddr` / `videoUrl` when present must be persisted; otherwise downloading the post's own media via the page `url` (yt-dlp) is allowed — Apify is not.
-- `ffmpeg` is available for local frame sampling.
-
-## Proposed solution (smallest change)
-
-Replace cover-only as the OCR unit inside the **existing** `extract_cover_text` path (no parallel OCR pipeline):
-
-1. **Persist media timeline fields** on scrape/replay:
-   - Fix slideshow URL extraction (`tiktokLink`, nested image lists).
-   - Store `video_url` on `raw_posts` when the Apify item already has a downloadable media URL.
-2. **Build a per-post frame list**:
-   - If `slideshow_urls` non-empty → OCR **all** those frames (cover alone is not enough; cover deduped if duplicated).
-   - Else if `video_url` (or resolvable page `url` → local download) → sample JPEG frames every `OCR_VIDEO_FRAME_INTERVAL` (default **1.5s**, in 1–2s band) via ffmpeg; OCR each.
-   - Else → cover fallback only (last resort for media-less rows).
-3. **Union** successful frame texts into one on-screen block on the caption.
-4. Keep PR #10 engine fallback; mark posts `failed`/`empty`/`done` without aborting discover.
-5. Partial 404s on individual frames: skip that frame, continue the post and the city run.
-
-## Out of scope
-
-- Live Seoul/Tokyo scrape or Apify dataset refresh.
-- Changing extractor / ranking / fail-closed policy (already removed in PR #10).
-- Using `*-flash-image` for OCR.
-
-## Acceptance tests
-
-- Slideshow fixture with N frames → OCR invoked for all N; cover-only text alone is insufficient for the assertion.
-- Synthetic video of known duration → ≈ `duration / 1.5` frames (± 1–2s interval tolerance).
-- Some frames 404 → city run / `extract_cover_text` continues (no raise); remaining frames still enrich when possible.
-- Default OCR models remain lite / preview vision, not image-gen.
+- Mapper: keep every non-mp4 `mediaUrls` entry; read `tiktokLink`; map `video_url`, `video_duration`, `is_slideshow`.
+- OCR stills: `cover_url` + all `slideshow_urls` (deduped) — same unit as main, once URLs land.
+- OCR video: samples from `video_url` only (no cover). Interval default 1.5s (clamped 1–2).
+- Engine chain unchanged; never fail-closed on the city run.

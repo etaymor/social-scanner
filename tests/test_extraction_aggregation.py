@@ -316,16 +316,17 @@ def test_ocr_default_models_are_live_multimodal_not_image_gen():
 
 
 def test_ocr_slideshow_all_n_frames_not_cover_only(monkeypatch, conn, city_id):
-    """Slideshow with N frames OCRs all N; cover-only text is not sufficient."""
+    """Slideshow with N frames OCRs all N; cover-only is not sufficient."""
     from pipeline import ocr
 
     n = 5
     frame_urls = [f"http://cdn.example/slide_{i}.jpg" for i in range(n)]
+    cover = "http://cdn.example/COVER_ONLY.jpg"
     conn.execute(
         "INSERT INTO raw_posts "
         "(city_id, platform, post_id, cover_url, slideshow_urls, caption, ocr_status) "
-        "VALUES (?, 'tiktok', 'ss1', 'http://cdn.example/COVER_ONLY.jpg', ?, 'list', 'pending')",
-        (city_id, "\n".join(frame_urls)),
+        "VALUES (?, 'tiktok', 'ss1', ?, ?, 'list', 'pending')",
+        (city_id, cover, "\n".join(frame_urls)),
     )
     conn.commit()
 
@@ -344,8 +345,9 @@ def test_ocr_slideshow_all_n_frames_not_cover_only(monkeypatch, conn, city_id):
 
     def fake_openrouter(image_bytes, model):
         ocr_calls.append(image_bytes)
-        # Cover would say COVER_ONLY — frames carry distinct venue names.
         label = image_bytes.decode()
+        if "COVER_ONLY" in label:
+            return ocr._EngineResult(text="COVER_TEXT_ONLY", engine=f"openrouter:{model}")
         idx = label.rsplit("_", 1)[-1].replace(".jpg", "")
         return ocr._EngineResult(
             text=f"Venue Frame {idx}",
@@ -357,10 +359,14 @@ def test_ocr_slideshow_all_n_frames_not_cover_only(monkeypatch, conn, city_id):
 
     enriched = ocr.extract_cover_text(conn, city_id, "Seoul")
     assert enriched == 1
+    # Stills unit = cover + every slideshow URL (main behavior once URLs land).
+    assert cover in downloaded
+    for u in frame_urls:
+        assert u in downloaded
     # FAIL if cover-only: must OCR every slideshow frame, not just COVER_ONLY.
-    assert len(ocr_calls) == n
-    assert "COVER_ONLY" not in "".join(downloaded)
-    assert downloaded == frame_urls
+    slide_ocr = [c for c in ocr_calls if b"slide_" in c]
+    assert len(slide_ocr) == n
+    assert len(ocr_calls) >= n  # at least all slides; cover may add one more
 
     row = conn.execute(
         "SELECT caption, ocr_status FROM raw_posts WHERE post_id = 'ss1'"
@@ -368,11 +374,14 @@ def test_ocr_slideshow_all_n_frames_not_cover_only(monkeypatch, conn, city_id):
     assert row["ocr_status"] == "done"
     for i in range(n):
         assert f"Venue Frame {i}" in row["caption"]
-    assert "COVER_ONLY" not in row["caption"]
+    # Cover-only caption would lack Venue Frame lines — already asserted above.
 
 
 def test_ocr_video_samples_approx_duration_over_interval(monkeypatch, conn, city_id, tmp_path):
-    """Synthetic video of known duration → ~duration/1.5 frames (± 1–2s band)."""
+    """Synthetic video of known duration → ~duration/1.5 frames (± 1–2s band).
+
+    FAIL if zero samples or cover-only path is used when video_url is set.
+    """
     import subprocess
 
     from pipeline import ocr
@@ -402,9 +411,9 @@ def test_ocr_video_samples_approx_duration_over_interval(monkeypatch, conn, city
     video_bytes = video_path.read_bytes()
     assert video_bytes
 
-    # Direct unit: frame sampler must not collapse to a single cover-like frame.
     frames = ocr.sample_video_frames(video_bytes, interval=interval)
     expected = duration / interval
+    assert len(frames) > 0, "FAIL: zero video samples on synthetic clip"
     # Tolerance spanning the settled 1–2s sampling band.
     assert duration / 2.0 <= len(frames) <= duration / 1.0 + 1
     assert abs(len(frames) - expected) <= 1.5
@@ -412,10 +421,11 @@ def test_ocr_video_samples_approx_duration_over_interval(monkeypatch, conn, city
 
     conn.execute(
         "INSERT INTO raw_posts "
-        "(city_id, platform, post_id, cover_url, video_url, caption, ocr_status) "
+        "(city_id, platform, post_id, cover_url, video_url, video_duration, "
+        "caption, ocr_status) "
         "VALUES (?, 'tiktok', 'vid1', 'http://cdn.example/COVER_ONLY.jpg', "
-        "'http://cdn.example/clip.mp4', 'vcap', 'pending')",
-        (city_id,),
+        "'http://cdn.example/clip.mp4', ?, 'vcap', 'pending')",
+        (city_id, duration),
     )
     conn.commit()
 
@@ -427,12 +437,12 @@ def test_ocr_video_samples_approx_duration_over_interval(monkeypatch, conn, city
     monkeypatch.setattr(
         ocr, "_download_video", lambda url, timeout=60: (video_bytes, False)
     )
-    # Cover download must not be the path used when video_url is present.
+    # Cover must not be OCR'd when video_url samples succeed (no t=0 double-count).
     monkeypatch.setattr(
         ocr,
         "_download_image",
         lambda url, timeout=10: (_ for _ in ()).throw(
-            AssertionError(f"cover-only path hit for {url}")
+            AssertionError(f"cover double-count / cover-only path hit for {url}")
         ),
     )
 
@@ -449,6 +459,7 @@ def test_ocr_video_samples_approx_duration_over_interval(monkeypatch, conn, city
 
     enriched = ocr.extract_cover_text(conn, city_id, "Seoul")
     assert enriched == 1
+    assert len(ocr_calls) > 0, "FAIL: zero OCR frames from synthetic video"
     assert duration / 2.0 <= len(ocr_calls) <= duration / 1.0 + 1
     assert abs(len(ocr_calls) - expected) <= 1.5
     assert len(ocr_calls) >= 3
@@ -458,6 +469,52 @@ def test_ocr_video_samples_approx_duration_over_interval(monkeypatch, conn, city
     ).fetchone()
     assert "VideoVenue1" in row["caption"]
     assert "COVER_ONLY" not in row["caption"]
+
+
+def test_ocr_video_download_miss_marks_failed_no_cover_soft_success(
+    monkeypatch, conn, city_id
+):
+    """ffmpeg/download miss → ocr_status=failed; city continues; no cover enrichment."""
+    from pipeline import ocr
+
+    conn.execute(
+        "INSERT INTO raw_posts "
+        "(city_id, platform, post_id, cover_url, video_url, caption, ocr_status) "
+        "VALUES (?, 'tiktok', 'vidmiss', 'http://cdn.example/COVER_ONLY.jpg', "
+        "'http://cdn.example/missing.mp4', 'plain', 'pending')",
+        (city_id,),
+    )
+    conn.commit()
+
+    monkeypatch.setattr(ocr.config, "OCR_USE_TESSERACT", False)
+    monkeypatch.setattr(ocr.config, "OCR_MODEL", "live/vision")
+    monkeypatch.setattr(ocr.config, "OCR_FALLBACK_MODELS", "")
+    monkeypatch.setattr(ocr.config, "OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(ocr, "_download_video", lambda url, timeout=60: (None, True))
+    monkeypatch.setattr(
+        ocr,
+        "_download_image",
+        lambda url, timeout=10: (_ for _ in ()).throw(
+            AssertionError("must not soft-succeed via cover on video miss")
+        ),
+    )
+    monkeypatch.setattr(
+        ocr,
+        "_ocr_openrouter",
+        lambda image_bytes, model: ocr._EngineResult(
+            text="SHOULD_NOT_RUN", engine=f"openrouter:{model}"
+        ),
+    )
+
+    enriched = ocr.extract_cover_text(conn, city_id, "Seoul")
+    assert enriched == 0
+    row = conn.execute(
+        "SELECT caption, ocr_status FROM raw_posts WHERE post_id = 'vidmiss'"
+    ).fetchone()
+    assert row["ocr_status"] == "failed"
+    assert "🔤 On-screen text:" not in (row["caption"] or "")
+    assert "COVER_ONLY" not in (row["caption"] or "")
+    assert "SHOULD_NOT_RUN" not in (row["caption"] or "")
 
 
 def test_ocr_partial_frame_404_city_run_continues(monkeypatch, conn, city_id):
@@ -507,10 +564,9 @@ def test_ocr_partial_frame_404_city_run_continues(monkeypatch, conn, city_id):
     assert row["ocr_status"] == "done"
     assert "ok_0" in row["caption"]
     assert "ok_2" in row["caption"]
-    assert "COVER.jpg" not in row["caption"]
 
 
-def test_media_timeline_prefers_slideshow_over_cover():
+def test_media_timeline_stills_are_cover_plus_slideshow():
     from pipeline.ocr import media_timeline_for_post
 
     refs = media_timeline_for_post(
@@ -521,11 +577,16 @@ def test_media_timeline_prefers_slideshow_over_cover():
             "url": "https://www.tiktok.com/@u/video/1",
         }
     )
-    assert [r.url for r in refs] == ["http://x/a.jpg", "http://x/b.jpg"]
+    # Slideshow wins over video_url; stills = cover + slides (deduped).
+    assert [r.url for r in refs] == [
+        "http://x/cover.jpg",
+        "http://x/a.jpg",
+        "http://x/b.jpg",
+    ]
     assert all(r.kind == "image_url" for r in refs)
 
 
-def test_media_timeline_prefers_video_over_cover():
+def test_media_timeline_video_excludes_cover():
     from pipeline.ocr import media_timeline_for_post
 
     refs = media_timeline_for_post(

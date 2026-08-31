@@ -1,15 +1,15 @@
 """Visual OCR — extract on-screen text from a post's media timeline.
 
-OCR unit is the **per-post media timeline**, not the cover thumbnail:
+OCR is a post-scrape caption enricher. Stills unit (same as main once URLs
+land): ``cover_url`` plus every newline-separated ``slideshow_urls`` line.
+Slideshow bugs are ingest (empty ``mediaUrls`` persistence), not the loop.
 
-- Slideshow / photo-mode: OCR **every** frame URL.
-- Video: sample one frame every 1–2 seconds (default 1.5s) via ffmpeg and OCR
-  each sample.
-- Union the text per post for extraction.
+Video (new): sample one frame every 1–2 seconds (default 1.5s) from
+``video_url`` via ffmpeg; do not also OCR cover (avoids t=0 double-count).
+Download/ffmpeg miss → ``ocr_status=failed`` for that post; city continues.
 
-Tries a fallback chain of engines. One engine/frame 404/timeout/auth miss must
-not abort the city run — the next engine or frame is tried. ``NO_TEXT`` from a
-vision model is a successful empty read, not an HTTP failure. Never fail-closed.
+Union text per post. PR #10 engine chain. Never fail-closed. Never
+``*-flash-image``.
 """
 
 from __future__ import annotations
@@ -345,9 +345,12 @@ def _split_urls(raw: object) -> list[str]:
 
 
 def media_timeline_for_post(post: sqlite3.Row | dict) -> list[_MediaRef]:
-    """Build the OCR media timeline for one post (slideshow → video → cover).
+    """Build the OCR media timeline for one post.
 
-    Cover alone is never preferred when slideshow frames or a video URL exist.
+    Stills (main behavior once URLs land): cover_url + every slideshow_urls
+    line, deduped. Video (new): samples from video_url only — do not also OCR
+    cover (avoids double-counting the t=0 frame). Cover alone only when neither
+    slideshow frames nor a downloadable video_url exist.
     """
 
     def _get(name: str) -> object:
@@ -359,19 +362,23 @@ def media_timeline_for_post(post: sqlite3.Row | dict) -> list[_MediaRef]:
             return None
 
     slideshow = _split_urls(_get("slideshow_urls"))
-    if slideshow:
-        return [_MediaRef("image_url", u) for u in slideshow]
-
+    cover = str(_get("cover_url") or "").strip()
     video = str(_get("video_url") or "").strip()
+
+    if slideshow:
+        # Match main's stills unit: cover first, then every slide URL (deduped).
+        urls: list[str] = []
+        if cover:
+            urls.append(cover)
+        for u in slideshow:
+            if u not in urls:
+                urls.append(u)
+        return [_MediaRef("image_url", u) for u in urls]
+
     if video:
+        # Video path only — never attach cover (t=0 sample ≈ cover).
         return [_MediaRef("video_url", video)]
 
-    # Allow resolving the post page URL to video bytes (yt-dlp) — no Apify.
-    page = str(_get("url") or "").strip()
-    if page and _is_page_url(page):
-        return [_MediaRef("video_url", page)]
-
-    cover = str(_get("cover_url") or "").strip()
     if cover:
         return [_MediaRef("image_url", cover)]
     return []
@@ -394,19 +401,20 @@ def _frames_from_media(ref: _MediaRef) -> tuple[list[bytes], bool]:
     return frames, False
 
 
-def _process_one(
-    post_id: int,
-    media: list[_MediaRef],
-    *,
-    cover_fallback: str | None = None,
-) -> _OCRAttempt:
-    """Download + OCR every frame on the post's media timeline; union text."""
+def _process_one(post_id: int, media: list[_MediaRef]) -> _OCRAttempt:
+    """Download + OCR every frame on the post's media timeline; union text.
+
+    Download/ffmpeg miss on a video (or total still miss) surfaces as
+    download_error → ``ocr_status=failed`` for that post; the city run continues.
+    No cover soft-success when the timeline was video-only.
+    """
     texts: list[str] = []
     engines_used: list[str] = []
     any_http = False
     any_download = False
     frame_count = 0
     attempted = False
+    had_video = any(r.kind == "video_url" for r in media)
 
     for ref in media:
         if not ref.url:
@@ -428,25 +436,12 @@ def _process_one(
             if text:
                 texts.append(text)
 
-    if frame_count == 0 and cover_fallback:
-        attempted = True
-        frames, dl_err = _frames_from_media(_MediaRef("image_url", cover_fallback))
-        if dl_err:
-            any_download = True
-        else:
-            for image_bytes in frames:
-                frame_count += 1
-                text, engine_err, engine = _ocr_image(image_bytes)
-                if engine_err:
-                    any_http = True
-                    continue
-                if engine:
-                    engines_used.append(engine)
-                if text:
-                    texts.append(text)
-
     if not attempted:
         return _OCRAttempt(post_id, download_error=True)
+
+    # Video download/ffmpeg produced zero frames → failed for this post (not cover).
+    if had_video and frame_count == 0:
+        return _OCRAttempt(post_id, download_error=True, frame_count=0)
 
     # Deduplicate identical frame reads while preserving order
     seen: set[str] = set()
@@ -511,17 +506,12 @@ def extract_cover_text(
         )
         max_workers = min(5, len(posts))
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {}
-            for post in posts:
-                cover = (post["cover_url"] or "").strip() if post["cover_url"] else None
-                futures[
-                    pool.submit(
-                        _process_one,
-                        post["id"],
-                        media_timeline_for_post(post),
-                        cover_fallback=cover,
-                    )
-                ] = post
+            futures = {
+                pool.submit(
+                    _process_one, post["id"], media_timeline_for_post(post)
+                ): post
+                for post in posts
+            }
             for future in as_completed(futures):
                 post = futures[future]
                 total_attempted += 1

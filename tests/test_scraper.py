@@ -112,16 +112,83 @@ class TestTikTokMapping:
         assert len(frames) == 3
         assert frames[0].endswith("frame0.jpg")
         assert frames[2].endswith("frame2.jpg")
+        assert result["is_slideshow"] is True
 
-    def test_video_url_from_download_addr(self):
+    def test_mapper_persists_every_mediaurls_entry(self):
+        """FAIL if mapper drops mediaUrls — ingest must land every slide URL."""
+        urls = [
+            "https://cdn.example/slide_0.jpg",
+            "https://cdn.example/slide_1.jpg",
+            "https://cdn.example/slide_2.jpg",
+            "https://cdn.example/slide_3.jpg",
+        ]
+        item = {
+            "id": "mediaurls-n",
+            "isSlideshow": True,
+            "mediaUrls": urls,
+            "videoMeta": {
+                "coverUrl": "https://cdn.example/COVER_ONLY.jpg",
+                "duration": 0,
+            },
+            "webVideoUrl": "https://www.tiktok.com/@u/photo/mediaurls-n",
+        }
+        result = _map_tiktok(item)
+        landed = result["slideshow_urls"].split("\n")
+        assert landed == urls, (
+            f"mapper dropped mediaUrls entries: expected {urls}, got {landed}"
+        )
+        # Cover alone is not a substitute for slideshow frames.
+        assert result["cover_url"].endswith("COVER_ONLY.jpg")
+        assert result["cover_url"] not in landed or len(landed) == len(urls)
+        assert result["is_slideshow"] is True
+
+    def test_insert_post_roundtrip_keeps_all_slideshow_urls(self, conn, city_id):
+        """DB insert must persist every mapped slide URL (not cover-only)."""
+        from pipeline import db
+
+        urls = [f"https://cdn.example/m{i}.jpg" for i in range(5)]
+        mapped = _map_tiktok(
+            {
+                "id": "rt1",
+                "isSlideshow": True,
+                "mediaUrls": urls,
+                "text": "slides",
+                "diggCount": 100,
+                "playCount": 5000,
+                "videoMeta": {"coverUrl": "https://cdn.example/cover.jpg", "duration": 0},
+            }
+        )
+        # Satisfy engagement filter fields for realism; insert_post does not filter.
+        conn.execute(
+            "INSERT INTO hashtags (city_id, tag, platform, scrape_status) "
+            "VALUES (?, 't', 'tiktok', 'completed')",
+            (city_id,),
+        )
+        hid = conn.execute("SELECT id FROM hashtags").fetchone()["id"]
+        raw_id = db.insert_post(conn, city_id, "tiktok", mapped, hid)
+        conn.commit()
+        assert raw_id is not None
+        row = conn.execute(
+            "SELECT slideshow_urls, cover_url, video_url, video_duration, is_slideshow "
+            "FROM raw_posts WHERE id = ?",
+            (raw_id,),
+        ).fetchone()
+        assert row["slideshow_urls"].split("\n") == urls
+        assert row["is_slideshow"] == 1
+        assert row["cover_url"].endswith("cover.jpg")
+
+    def test_video_url_and_duration_persisted_from_apify_fields(self):
         item = {
             "id": "v1",
             "downloadAddr": "https://cdn.example/video.mp4",
             "videoUrl": "https://www.tiktok.com/@u/video/v1",
-            "videoMeta": {"coverUrl": "https://cdn.example/cover.jpg", "duration": 12},
+            "videoMeta": {"coverUrl": "https://cdn.example/cover.jpg", "duration": 12.5},
+            "isSlideshow": False,
         }
         result = _map_tiktok(item)
         assert result["video_url"] == "https://cdn.example/video.mp4"
+        assert result["video_duration"] == 12.5
+        assert result["is_slideshow"] is False
         # Page URL must never be stored as video_url
         assert "tiktok.com/@" not in (result["video_url"] or "")
 
@@ -130,9 +197,11 @@ class TestTikTokMapping:
             "id": "v2",
             "videoUrl": "https://www.tiktok.com/@u/video/v2",
             "webVideoUrl": "https://www.tiktok.com/@u/video/v2",
+            "videoMeta": {"duration": 9},
         }
         result = _map_tiktok(item)
         assert result["video_url"] == ""
+        assert result["video_duration"] == 9.0
 
 
 class TestInstagramMapping:

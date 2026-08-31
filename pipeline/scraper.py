@@ -137,6 +137,28 @@ def _slideshow_urls(item: dict) -> str:
     return "\n".join(out)
 
 
+def _video_duration(item: dict) -> float | None:
+    """Seconds from videoMeta.duration when present."""
+    video_meta = item.get("videoMeta") or {}
+    if not isinstance(video_meta, dict):
+        return None
+    raw = video_meta.get("duration")
+    if raw is None:
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return val if val > 0 else None
+
+
+def _is_slideshow(item: dict) -> bool:
+    if item.get("isSlideshow") is True:
+        return True
+    # Non-empty photo-mode frames imply slideshow even if the flag is missing.
+    return bool(_slideshow_urls(item))
+
+
 def _video_url(item: dict) -> str:
     """Direct downloadable video URL when present — never the HTML page link."""
     candidates: list[str] = []
@@ -190,6 +212,7 @@ def _map_tiktok(item: dict) -> dict:
 
     # Get collectCount from top-level OR stats (fallback)
     saves = item.get("collectCount") or stats.get("collectCount", 0)
+    slideshow_urls = _slideshow_urls(item)
 
     return {
         "post_id": post_id,
@@ -206,8 +229,10 @@ def _map_tiktok(item: dict) -> dict:
         "created_at": item.get("createTime"),
         "cover_url": cover_url,
         "subtitle_urls": _subtitle_urls(video_meta),
-        "slideshow_urls": _slideshow_urls(item),
+        "slideshow_urls": slideshow_urls,
         "video_url": _video_url(item),
+        "video_duration": _video_duration(item),
+        "is_slideshow": _is_slideshow(item),
     }
 
 
