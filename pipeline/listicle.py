@@ -3,6 +3,10 @@
 Used as a supplement to LLM extraction so numbered "Top N restaurants" lists
 and OCR/subtitle blocks are not lost when captions are long or the model skips
 items. Does not invent places — only parses explicit name-like lines.
+
+On-screen OCR (🔤) is treated as noisy overlay chrome: floor numbers, city-only
+labels, English filler, and dish generics without a venue are dropped. Real
+venue names in the same block are kept. Never fail-closed — empty results are OK.
 """
 
 from __future__ import annotations
@@ -36,6 +40,125 @@ _SKIP = frozenset(
     }
 )
 
+# Building-level chrome from map pins / storefront overlays: 1F, 2F, B1, 2F-3F, 2F 3F
+_FLOOR_ONLY = re.compile(
+    r"^(?:"
+    r"[Bb]\d{1,2}"
+    r"|\d{1,2}\s*[Ff]"
+    r")(?:\s*[-–—~/to]+\s*(?:[Bb]?\d{1,2}\s*[Ff]?))?(?:\s+(?:[Bb]?\d{1,2}\s*[Ff]?))*$",
+    re.I,
+)
+
+# City-only overlay labels: "SEOUL", "IN SEOUL", "IN TOKYO"
+_CITY_ONLY = re.compile(
+    r"^(?:in\s+)?(?:"
+    r"seoul|tokyo|osaka|busan|kyoto|yokohama|nagoya|fukuoka|"
+    r"korea|japan|south\s+korea"
+    r")$",
+    re.I,
+)
+
+# English filler / reaction chrome commonly burned into food TikToks
+_FILLER = frozenset(
+    {
+        "here",
+        "delicious",
+        "yummy",
+        "tasty",
+        "amazing",
+        "so good",
+        "so delicious",
+        "must try",
+        "must eat",
+        "best",
+        "recommend",
+        "recommended",
+        "save this",
+        "save for later",
+        "follow",
+        "like",
+        "comment",
+        "subscribe",
+        "next",
+        "look",
+        "wow",
+        "omg",
+        "food",
+        "eat",
+        "try this",
+        "this place",
+        "this spot",
+        "wait for it",
+        "let's go",
+        "lets go",
+    }
+)
+
+# Dish / cuisine phrases that are not venues when they appear alone (no proper name)
+_DISH_GENERIC = frozenset(
+    {
+        "naengmyeon",
+        "bibimbap",
+        "bulgogi",
+        "dakgalbi",
+        "seolleongtang",
+        "tteokbokki",
+        "kimbap",
+        "gimbap",
+        "kimchi",
+        "galbi",
+        "samgyeopsal",
+        "jjajangmyeon",
+        "tangsuyuk",
+        "korean beef barbecue",
+        "korean beef bbq",
+        "korean barbecue",
+        "korean bbq",
+        "beef barbecue",
+        "beef bbq",
+        "fried chicken",
+        "hot pot",
+        "ramen",
+        "sushi",
+        "udon",
+        "soba",
+        "tonkatsu",
+        "okonomiyaki",
+        "takoyaki",
+        "salt bread",
+        "pot rice",
+        "brisket",
+        "hanwoo",
+        "cold noodles",
+        "korean food",
+        "korean comfort food",
+        "traditional korean food",
+        "spicy stir-fried chicken",
+        "soy marinated raw crab",
+        "ox bone soup",
+        "breakfast sandwich",
+    }
+)
+
+
+def is_overlay_junk(name: str) -> bool:
+    """True if *name* is OCR/overlay chrome, not a venue.
+
+    Drops floor numbers, city-only labels, English filler, and dish generics
+    without a venue. Proper names (e.g. ``Myeongdong Kyoja``) return False.
+    """
+    cleaned = re.sub(r"\s+", " ", name).strip()
+    if not cleaned:
+        return True
+    lower = cleaned.lower()
+    if lower in _SKIP or lower in _FILLER or lower in _DISH_GENERIC:
+        return True
+    if _FLOOR_ONLY.match(cleaned):
+        return True
+    if _CITY_ONLY.match(cleaned):
+        return True
+    return False
+
 
 def _clean_name(raw: str) -> str | None:
     # Strip trailing "— description" / "- description" / "(branch)"
@@ -48,6 +171,8 @@ def _clean_name(raw: str) -> str | None:
     if name.lower() in _SKIP:
         return None
     if re.match(r"^(mix|add|boil|bake|let|refrigerate|here are|number)\b", name, re.I):
+        return None
+    if is_overlay_junk(name):
         return None
     return name
 

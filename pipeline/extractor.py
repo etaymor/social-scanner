@@ -6,7 +6,7 @@ import sqlite3
 import config
 
 from . import db
-from .listicle import extract_named_places_heuristic
+from .listicle import extract_named_places_heuristic, is_overlay_junk
 from .llm import LLMError, call_llm_json, sanitize_text
 
 log = logging.getLogger(__name__)
@@ -28,6 +28,7 @@ Rules:
 - DO extract places even if only a business name is given (e.g. "@CafeBlue" → "Cafe Blue")
 - DO extract places from numbered lists (e.g. "1. Sushi Dai 2. Ramen Street" → extract both)
 - DO extract places written only in on-screen/subtitle blocks even when the main caption is generic
+- Treat 🔤 on-screen text as noisy video overlay chrome, NOT as a clean caption: DO extract clear venue/business names; DO NOT extract floor/building labels (1F, 2F, 5F, B1), city-only labels ("IN SEOUL", "{city_name}"), English filler (HERE, delicious, yummy, wow), or dish/cuisine phrases without a venue name (naengmyeon, Korean beef barbecue, ramen, salt bread)
 - DO NOT extract the city name itself ("{city_name}") or the country name as a place
 - DO NOT extract generic city + cuisine combinations (e.g. "Tokyo Sushi", "Tokyo Ramen") unless they are clearly a specific business name with additional context
 - DO NOT extract standalone neighborhood or area names from location tags unless paired with a specific business name (e.g. "Shibuya" alone is not a venue, but "Shibuya Crossing" or "Cafe in Shibuya" would be)
@@ -80,6 +81,9 @@ def _upsert_extracted(
         if not name:
             continue
         if name.lower() == city_name.lower():
+            continue
+        # OCR overlay chrome (floors, city-only, filler, dish generics) is not a venue
+        if is_overlay_junk(name):
             continue
         place_type = _validate_place_type(place.get("type", "other"))
         category = _validate_category(place.get("category"), place_type)

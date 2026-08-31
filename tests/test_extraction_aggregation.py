@@ -52,6 +52,57 @@ def test_onscreen_ocr_block_extracts_venues():
     assert "Puddifle Salt Bread" in names
 
 
+def test_ocr_overlay_junk_only_extracts_zero_places():
+    """🔤 block that is only overlay chrome must yield zero places (never invent)."""
+    caption = (
+        "Seoul food TikTok 🍜\n"
+        "🔤 On-screen text:\n"
+        "IN SEOUL\n"
+        "2F\n"
+        "5F\n"
+        "HERE\n"
+        "delicious\n"
+        "Korean beef barbecue\n"
+        "naengmyeon"
+    )
+    places = extract_named_places_heuristic(caption)
+    assert places == []
+
+
+def test_ocr_overlay_junk_plus_venue_keeps_kyoja_not_floor():
+    """Junk + real venue → keep Myeongdong Kyoja; drop 2F / city / dish filler."""
+    caption = (
+        "Must eat in Seoul\n"
+        "🔤 On-screen text:\n"
+        "IN SEOUL\n"
+        "2F\n"
+        "HERE\n"
+        "delicious\n"
+        "Korean beef barbecue\n"
+        "naengmyeon\n"
+        "Myeongdong Kyoja\n"
+        "5F"
+    )
+    places = extract_named_places_heuristic(caption)
+    names = {p["name"] for p in places}
+    assert "Myeongdong Kyoja" in names
+    assert "Kyoja" in " ".join(names) or "Myeongdong Kyoja" in names
+    for junk in (
+        "IN SEOUL",
+        "2F",
+        "5F",
+        "HERE",
+        "delicious",
+        "Korean beef barbecue",
+        "naengmyeon",
+    ):
+        assert junk not in names
+        assert junk.lower() not in {n.lower() for n in names}
+    # Only the venue — not a pile of overlay tokens
+    assert len(places) == 1
+    assert places[0]["name"] == "Myeongdong Kyoja"
+
+
 def test_onscreen_and_bullet_formats():
     bullet = (
         "Here are the places I visited:\n\n"
