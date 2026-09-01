@@ -96,6 +96,7 @@ A place discovery pipeline that:
    | `OPENROUTER_MODEL`   | No       | `google/gemini-3.1-flash-lite`   | Caption extract / JSON via OpenRouter            |
    | `OCR_MODEL`          | No       | `google/gemini-3.1-flash-lite`   | Vision OCR primary (not `*-flash-image`)         |
    | `OCR_VIDEO_FRAME_INTERVAL` | No | `1.5`                          | Seconds between video OCR samples (clamped 1–2)  |
+   | `OCR_WORKERS`        | No       | `4`                              | Concurrent posts for download+OCR (clamped 1–16) |
    | `GEMINI_MODEL`       | No       | `google/gemini-3.1-flash-image`  | Slideshow image gen only (Nano Banana 2)         |
    | `DB_PATH`            | No       | `places.db`                      | Path to the SQLite database file                 |
    | `FLASK_DEBUG`        | No       | `false`                          | Set to `true` for Flask debug mode               |

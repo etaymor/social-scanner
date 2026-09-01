@@ -504,6 +504,8 @@ def test_ocr_default_models_are_live_multimodal_not_image_gen():
             assert "flash-image" not in mid
             assert mid != "google/gemini-3.1-flash"  # no such slug
     assert 1.0 <= float(cfg.OCR_VIDEO_FRAME_INTERVAL) <= 2.0
+    assert int(cfg.OCR_WORKERS) == 4
+    assert 1 <= int(cfg.OCR_WORKERS_MAX) <= 16
 
 
 def test_ocr_slideshow_all_n_frames_not_cover_only(monkeypatch, conn, city_id):

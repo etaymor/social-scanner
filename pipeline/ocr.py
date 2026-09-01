@@ -24,6 +24,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,10 @@ import requests
 import config
 
 log = logging.getLogger(__name__)
+
+# Soft upper bound — also mirrored on config.OCR_WORKERS_MAX for docs/tests.
+_OCR_WORKERS_MIN = 1
+_OCR_WORKERS_MAX = 16
 
 _OCR_PROMPT = """\
 Read ALL text visible on screen in this social media post image.
@@ -268,6 +273,19 @@ def _video_frame_interval() -> float:
     except (TypeError, ValueError):
         interval = 1.5
     return min(2.0, max(1.0, interval))
+
+
+def _ocr_worker_count(n_posts: int) -> int:
+    """How many posts may download+OCR at once (DB writes stay single-threaded)."""
+    raw = getattr(config, "OCR_WORKERS", 4)
+    try:
+        configured = int(raw)
+    except (TypeError, ValueError):
+        configured = 4
+    hard_max = int(getattr(config, "OCR_WORKERS_MAX", _OCR_WORKERS_MAX) or _OCR_WORKERS_MAX)
+    hard_max = max(_OCR_WORKERS_MIN, min(_OCR_WORKERS_MAX, hard_max))
+    workers = max(_OCR_WORKERS_MIN, min(hard_max, configured))
+    return max(_OCR_WORKERS_MIN, min(workers, max(1, n_posts)))
 
 
 def sample_video_frames(
@@ -607,6 +625,64 @@ def _process_one(post_id: int, media: list[_MediaRef]) -> _OCRAttempt:
     )
 
 
+def _apply_ocr_result(
+    conn: sqlite3.Connection,
+    post: sqlite3.Row | dict,
+    result: _OCRAttempt,
+) -> tuple[bool, bool]:
+    """Persist one OCR attempt. Returns (enriched, http_or_download_error).
+
+    Caller must hold the DB write lock. Never raises for soft OCR failures.
+    """
+    post_id = result.post_id
+    caption = _get_field(post, "caption") or ""
+
+    if result.http_error:
+        conn.execute(
+            "UPDATE raw_posts SET ocr_status = 'failed' WHERE id = ?",
+            (post_id,),
+        )
+        log.warning(
+            "OCR all engines failed for post %d — marked failed, continuing",
+            post_id,
+        )
+        return False, True
+
+    if result.text:
+        if "🔤 On-screen text:" not in str(caption):
+            updated = f"{caption}\n🔤 On-screen text: {result.text}"
+            conn.execute(
+                "UPDATE raw_posts SET caption = ?, ocr_status = 'done' WHERE id = ?",
+                (updated, post_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE raw_posts SET ocr_status = 'done' WHERE id = ?",
+                (post_id,),
+            )
+        log.info(
+            "OCR enriched post %d via %s (%d frames)",
+            post_id,
+            result.engine or "unknown",
+            result.frame_count,
+        )
+        return True, False
+
+    status = "empty" if not result.download_error else "failed"
+    conn.execute(
+        "UPDATE raw_posts SET ocr_status = ? WHERE id = ?",
+        (status, post_id),
+    )
+    if status == "empty":
+        log.info(
+            "OCR post %d: no on-screen text (%s, %d frames)",
+            post_id,
+            result.engine or "unknown",
+            result.frame_count,
+        )
+    return False, bool(result.download_error)
+
+
 def extract_cover_text(
     conn: sqlite3.Connection,
     city_id: int,
@@ -615,13 +691,16 @@ def extract_cover_text(
 ) -> int:
     """OCR each pending post's media timeline (slideshow frames / video samples).
 
-    Loops until no pending posts remain. Appends unioned on-screen text to
-    captions. Never aborts the city run when OCR engines or individual frames
-    are down — posts are marked ``failed`` and discover continues.
+    Download + ffmpeg + engine chain run concurrently across posts
+    (``OCR_WORKERS``). SQLite upserts are applied on the orchestrator thread
+    under a write lock — workers never share ``conn``. Never aborts the city
+    run when OCR engines or individual frames are down — posts are marked
+    ``failed`` and discover continues.
     """
     total_enriched = 0
     total_attempted = 0
     total_http_errors = 0
+    db_lock = threading.Lock()
 
     while True:
         posts = conn.execute(
@@ -649,18 +728,22 @@ def extract_cover_text(
         if not posts:
             break
 
+        max_workers = _ocr_worker_count(len(posts))
         log.info(
-            "Running visual OCR (media timeline) on %d posts for %s...",
+            "Running visual OCR (media timeline) on %d posts for %s "
+            "(%d workers)...",
             len(posts),
             city_name,
+            max_workers,
         )
-        max_workers = min(5, len(posts))
+
+        # Build timelines on this thread so sqlite3.Row stays off the pool.
+        jobs = [(post["id"], media_timeline_for_post(post), post) for post in posts]
+
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {
-                pool.submit(
-                    _process_one, post["id"], media_timeline_for_post(post)
-                ): post
-                for post in posts
+                pool.submit(_process_one, post_id, media): post
+                for post_id, media, post in jobs
             }
             for future in as_completed(futures):
                 post = futures[future]
@@ -669,62 +752,22 @@ def extract_cover_text(
                     result = future.result()
                 except Exception:
                     total_http_errors += 1
-                    conn.execute(
-                        "UPDATE raw_posts SET ocr_status = 'failed' WHERE id = ?",
-                        (post["id"],),
-                    )
+                    with db_lock:
+                        conn.execute(
+                            "UPDATE raw_posts SET ocr_status = 'failed' WHERE id = ?",
+                            (post["id"],),
+                        )
+                        conn.commit()
                     log.debug("OCR failed for post %d", post["id"], exc_info=True)
                     continue
 
-                if result.http_error:
-                    total_http_errors += 1
-                    conn.execute(
-                        "UPDATE raw_posts SET ocr_status = 'failed' WHERE id = ?",
-                        (result.post_id,),
-                    )
-                    log.warning(
-                        "OCR all engines failed for post %d — marked failed, continuing",
-                        result.post_id,
-                    )
-                    continue
-
-                if result.text:
-                    existing = post["caption"] or ""
-                    if "🔤 On-screen text:" not in existing:
-                        updated = existing + f"\n🔤 On-screen text: {result.text}"
-                        conn.execute(
-                            "UPDATE raw_posts SET caption = ?, ocr_status = 'done' WHERE id = ?",
-                            (updated, result.post_id),
-                        )
-                    else:
-                        conn.execute(
-                            "UPDATE raw_posts SET ocr_status = 'done' WHERE id = ?",
-                            (result.post_id,),
-                        )
+                with db_lock:
+                    enriched, err = _apply_ocr_result(conn, post, result)
+                    conn.commit()
+                if enriched:
                     total_enriched += 1
-                    log.info(
-                        "OCR enriched post %d via %s (%d frames)",
-                        result.post_id,
-                        result.engine or "unknown",
-                        result.frame_count,
-                    )
-                else:
-                    status = "empty" if not result.download_error else "failed"
-                    if result.download_error:
-                        total_http_errors += 1
-                    conn.execute(
-                        "UPDATE raw_posts SET ocr_status = ? WHERE id = ?",
-                        (status, result.post_id),
-                    )
-                    if status == "empty":
-                        log.info(
-                            "OCR post %d: no on-screen text (%s, %d frames)",
-                            result.post_id,
-                            result.engine or "unknown",
-                            result.frame_count,
-                        )
-
-        conn.commit()
+                if err:
+                    total_http_errors += 1
 
     if total_attempted == 0:
         log.info("No posts with media timeline assets to OCR for %s", city_name)

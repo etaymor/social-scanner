@@ -69,6 +69,17 @@ OCR_USE_TESSERACT = os.getenv("OCR_USE_TESSERACT", "true").lower() in (
 OCR_TESSERACT_LANG = os.getenv("OCR_TESSERACT_LANG", "eng+kor")
 # Video OCR: sample one frame every N seconds (must stay in the 1–2s band).
 OCR_VIDEO_FRAME_INTERVAL = float(os.getenv("OCR_VIDEO_FRAME_INTERVAL", "1.5"))
+# Concurrent posts for download+OCR compute. DB upserts stay single-threaded.
+# Clamp in pipeline.ocr — keep default modest to avoid melting OpenRouter/TikTok.
+def _parse_ocr_workers(raw: str | None, default: int = 4) -> int:
+    try:
+        return int(raw) if raw is not None and str(raw).strip() != "" else default
+    except (TypeError, ValueError):
+        return default
+
+
+OCR_WORKERS = _parse_ocr_workers(os.getenv("OCR_WORKERS"), 4)
+OCR_WORKERS_MAX = 16
 
 # Postiz (TikTok posting)
 POSTIZ_API_KEY = os.getenv("POSTIZ_API_KEY", "")
